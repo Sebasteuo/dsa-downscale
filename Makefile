@@ -1,11 +1,16 @@
 PY=python3
 
+# objetivos que siempre deben ejecutarse
+.PHONY: help gen_vectors golden_all compare_self dims
+
 help:
 	@echo "make help"
-	@echo "make gen_example   crea un gradiente 8x8 en RAW"
-	@echo "make golden        ejecuta el modelo y genera salida RAW y PGM"
-	@echo "make compare_self  compara un archivo contra sí mismo"
+	@echo "make gen_vectors     genera RAW de entrada (32x32 y 64x64)"
+	@echo "make golden_all      crea todos los golden outputs segun manifest.csv"
+	@echo "make compare_self    compara un archivo contra si mismo"
+	@echo "make dims            calcula W_out H_out de un ejemplo"
 
+# Día 1 (se mantienen)
 gen_example:
 	$(PY) model/img2raw.py --w 8 --h 8 --pattern grad --out vectors/patterns/grad_8x8.raw
 
@@ -14,3 +19,16 @@ golden: gen_example
 
 compare_self:
 	$(PY) pc/compare.py --wa 8 --ha 8 --wb 8 --hb 8 --a vectors/patterns/grad_8x8.raw --b vectors/patterns/grad_8x8.raw
+
+# Día 2
+gen_vectors:
+	$(PY) model/img2raw.py --w 32 --h 32 --pattern grad --out vectors/patterns/grad_32x32.raw
+	$(PY) model/img2raw.py --w 64 --h 64 --pattern checker --out vectors/patterns/checker_64x64.raw
+	@echo "manifest en vectors/manifest.csv listo"
+
+golden_all: gen_vectors
+	$(PY) scripts/make_golden.py
+
+# utilidad (ejemplo)
+dims:
+	$(PY) scripts/calc_dims.py --w 64 --h 64 --scale 0.75
