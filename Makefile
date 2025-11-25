@@ -43,3 +43,22 @@ bilinear_csv: gen_vectors
 
 unit_csv: coords_csv bilinear_csv
 	@echo "csv unitarios listos en results/"
+
+.PHONY: tb_top tb_top_sv tb_top_sw compare_top
+
+tb_top_sv: gen_vectors
+	@if command -v iverilog >/dev/null 2>&1; then \
+		iverilog -g2012 -o tb_top_sv tb/top/tb_top_scalar.sv && vvp tb_top_sv; \
+	else \
+		$(MAKE) tb_top_sw; \
+	fi
+
+tb_top_sw: gen_vectors
+	$(PY) model/downscale_ref.py --in vectors/patterns/grad_32x32.raw --w 32 --h 32 --scale 0.5 --out-raw results/out_hw.raw --out-pgm results/out_hw.pgm
+
+tb_top: tb_top_sv
+
+compare_top:
+	@W2=`$(PY) scripts/calc_dims.py --w 32 --h 32 --scale 0.5 | cut -d' ' -f1`; \
+	H2=`$(PY) scripts/calc_dims.py --w 32 --h 32 --scale 0.5 | cut -d' ' -f2`; \
+	$(PY) pc/compare.py --wa $$W2 --ha $$H2 --wb $$W2 --hb $$H2 --a results/out_hw.raw --b vectors/golden/grad_32_s05.raw
