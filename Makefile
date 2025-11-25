@@ -62,3 +62,21 @@ compare_top:
 	@W2=`$(PY) scripts/calc_dims.py --w 32 --h 32 --scale 0.5 | cut -d' ' -f1`; \
 	H2=`$(PY) scripts/calc_dims.py --w 32 --h 32 --scale 0.5 | cut -d' ' -f2`; \
 	$(PY) pc/compare.py --wa $$W2 --ha $$H2 --wb $$W2 --hb $$H2 --a results/out_hw.raw --b vectors/golden/grad_32_s05.raw
+
+.PHONY: meta_sw perf_summary report all_ok
+
+# meta con los datos del caso 32x32 s=0.5 por ahora en modo sw
+meta_sw:
+	$(PY) scripts/make_meta.py --w 32 --h 32 --scale 0.5 --mode sw --units 1 --out results/meta.json
+
+# imprime resumen desde meta.json
+perf_summary:
+	$(PY) pc/summarize_perf.py --meta results/meta.json
+
+# genera reporte markdown usando out_hw.raw y el golden
+report:
+	$(PY) scripts/make_report.py --meta results/meta.json --hw results/out_hw.raw --golden vectors/golden/grad_32_s05.raw --out results/report.md
+
+# ruta feliz: genera todo y deja reporte
+all_ok: gen_vectors golden_all tb_top compare_top meta_sw perf_summary report
+	@echo "listo todo"
