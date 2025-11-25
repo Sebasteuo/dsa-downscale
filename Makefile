@@ -80,3 +80,22 @@ report:
 # ruta feliz: genera todo y deja reporte
 all_ok: gen_vectors golden_all tb_top compare_top meta_sw perf_summary report
 	@echo "listo todo"
+
+.PHONY: tb_unit tb_coords tb_bilinear
+
+tb_coords: unit_csv
+	@if command -v iverilog >/dev/null 2>&1; then \
+		iverilog -g2012 -o tb_coords tb/unit/tb_coords_gen.sv && vvp tb_coords; \
+	else \
+		echo "no hay iverilog instalado"; \
+	fi
+
+tb_bilinear: unit_csv
+	@if command -v iverilog >/dev/null 2>&1; then \
+		iverilog -g2012 -o tb_bilinear tb/unit/tb_bilinear_core.sv && vvp tb_bilinear; \
+	else \
+		echo "no hay iverilog instalado"; \
+	fi
+
+tb_unit: tb_coords tb_bilinear
+	@echo "unitarios ok"
