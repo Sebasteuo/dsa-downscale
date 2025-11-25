@@ -1,0 +1,4 @@
+# name,w,h,scale,in_path,out_raw,out_pgm
+grad_32,32,32,1.0,vectors/patterns/grad_32x32.raw,vectors/golden/grad_32_s10.raw,vectors/golden/grad_32_s10.pgm
+grad_32_s05,32,32,0.5,vectors/patterns/grad_32x32.raw,vectors/golden/grad_32_s05.raw,vectors/golden/grad_32_s05.pgm
+checker_64_s075,64,64,0.75,vectors/patterns/checker_64x64.raw,vectors/golden/checker_64_s075.raw,vectors/golden/checker_64_s075.pgm
