@@ -32,3 +32,14 @@ golden_all: gen_vectors
 # utilidad (ejemplo)
 dims:
 	$(PY) scripts/calc_dims.py --w 64 --h 64 --scale 0.75
+
+.PHONY: unit_csv coords_csv bilinear_csv
+
+coords_csv:
+	$(PY) scripts/gen_coords_csv.py --w 32 --h 32 --scale 0.5 --out results/coords_32_s05.csv
+
+bilinear_csv: gen_vectors
+	$(PY) scripts/gen_bilinear_cases.py --in vectors/patterns/grad_32x32.raw --w 32 --h 32 --scale 0.5 --out results/bilinear_cases_grad32_s05.csv
+
+unit_csv: coords_csv bilinear_csv
+	@echo "csv unitarios listos en results/"
