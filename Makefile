@@ -99,3 +99,22 @@ tb_bilinear: unit_csv
 
 tb_unit: tb_coords tb_bilinear
 	@echo "unitarios ok"
+
+# --- utilidades ---
+.PHONY: dirs setup
+dirs:
+	@mkdir -p vectors/golden results
+
+# atajos útiles
+setup: dirs gen_vectors
+
+# asegurar carpetas antes de generar cosas
+golden_all: dirs
+tb_top_sw: dirs
+tb_top_sv: dirs
+meta_sw: dirs
+report: dirs
+compare_top: dirs
+
+# perf_summary debe tener meta.json listo
+perf_summary: meta_sw

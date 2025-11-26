@@ -1,3 +1,18 @@
 __pycache__/
 *.pyc
 results/
+
+# generados
+results/
+vectors/golden/
+vectors/patterns/*.raw
+*.raw
+*.pgm
+# binarios/temporales sim
+*.vvp
+tb_top_sv
+tb_coords
+tb_bilinear
+# python cache
+__pycache__/
+*.pyc
