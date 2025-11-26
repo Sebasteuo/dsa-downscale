@@ -16,3 +16,5 @@ tb_bilinear
 # python cache
 __pycache__/
 *.pyc
+# Vscode
+.vscode/*
