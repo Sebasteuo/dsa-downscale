@@ -13,7 +13,7 @@ module tb_top_scalar;
   localparam OUT_H = 16;
 
   // 0 = corre normal, 1 = stepping
-  localparam USE_STEPPING = 1'b0;
+  localparam USE_STEPPING = 1'b1;
 
   // BRAM
   reg [7:0] img_in  [0:IN_W*IN_H-1];   // 0..1023
@@ -185,6 +185,9 @@ module tb_top_scalar;
         while (step_ack == 1'b1) @(posedge clk);  // esperar que el core limpie ACK
 
         ciclos = ciclos + 1;
+        if (ciclos % 50 == 0) begin
+          $display("[TB] STEP ciclos=%0d", ciclos);
+        end
       end
     end
 
