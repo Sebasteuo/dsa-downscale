@@ -1,8 +1,6 @@
 // tb/rtl/bilinear_core_scalar.sv
 // Núcleo secuencial: procesa un píxel de salida cada 2 ciclos
-// - Coordenadas en Q8.8 con inv_scale_q ≈ 1/scale
-// - Pide 4 vecinos por píxel (rd_addr0..3) y al ciclo siguiente
-//   usa rd_data0..3 para calcular wr_data.
+// Ahora con opción de stepping (STEP / STEP_ACK).
 
 `timescale 1ns/1ps
 
@@ -21,6 +19,12 @@ module bilinear_core_scalar #(
     input  [15:0] out_h,
     input  [15:0] inv_scale_q,   // Q8.8 ≈ 1/scale
 
+    // Stepping
+    input        step_mode,  // 0 = corre normal, 1 = stepping
+    input        step,       // pedido de paso (desde CTRL.STEP)
+    output reg   step_ack,   // se pone en 1 cuando se consumió ese paso
+
+    // Estado
     output reg   busy,
     output reg   done,
 
@@ -72,7 +76,7 @@ module bilinear_core_scalar #(
     integer pix;
 
     // ----------------------------------------------------------------
-    // Lógica secuencial principal
+    // Lógica secuencial principal + stepping
     // ----------------------------------------------------------------
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -88,129 +92,246 @@ module bilinear_core_scalar #(
             rd_addr2 <= 32'd0;
             rd_addr3 <= 32'd0;
             state    <= S_IDLE;
+            step_ack <= 1'b0;
         end else begin
-            // defaults
+            // default
             wr_valid <= 1'b0;
 
-            case (state)
-                //--------------------------------------------------
-                S_IDLE: begin
-                    busy <= 1'b0;
-                    // done se limpia al arrancar un nuevo start
-                    if (start) begin
-                        busy  <= 1'b1;
-                        done  <= 1'b0;
-                        cur_x <= 16'd0;
-                        cur_y <= 16'd0;
-                        state <= S_ISSUE;
-                        $display("[CORE] START t=%0t out_w=%0d out_h=%0d", $time, out_w, out_h);
-                    end
-                end
+            // ---------------------------
+            // Modo stepping
+            // ---------------------------
+            if (step_mode) begin
+                // Handshake:
+                //  - si step=1 y step_ack=0 -> consumimos un paso y ponemos step_ack=1
+                //  - si step=0 y step_ack=1 -> limpiamos step_ack
+                //  - en cualquier otro caso, mantenemos el estado (no avanza la FSM)
+                if (step && !step_ack) begin
+                    // Consumimos un paso: avanzamos UNA vez la FSM
+                    step_ack <= 1'b1;
 
-                //--------------------------------------------------
-                // ISSUE: para el píxel (cur_x,cur_y)
-                //--------------------------------------------------
-                S_ISSUE: begin
-                    // Índices enteros de salida
-                    yo_int = cur_y;
-                    xo_int = cur_x;
-
-                    // (yo + 0.5) en Q8.8
-                    yo_q = (yo_int << FRAC_BITS) + (ONE_Q/2);
-                    // (yo+0.5) * (1/scale) -> Q16.16, luego a Q8.8
-                    temp_q_y = (yo_q * inv_scale_q) >> FRAC_BITS;
-                    // -0.5 en Q8.8
-                    ys_q = temp_q_y - (ONE_Q/2);
-
-                    // (xo + 0.5) en Q8.8
-                    xo_q = (xo_int << FRAC_BITS) + (ONE_Q/2);
-                    temp_q_x = (xo_q * inv_scale_q) >> FRAC_BITS;
-                    xs_q = temp_q_x - (ONE_Q/2);
-
-                    // Parte entera (clamp a [0, in_h-1] / [0, in_w-1])
-                    y_int = ys_q >>> FRAC_BITS;
-                    if (y_int < 0)           y_int = 0;
-                    else if (y_int > in_h-1) y_int = in_h-1;
-
-                    x_int = xs_q >>> FRAC_BITS;
-                    if (x_int < 0)           x_int = 0;
-                    else if (x_int > in_w-1) x_int = in_w-1;
-
-                    y0_i = y_int;
-                    if (y_int + 1 <= in_h-1) y1_i = y_int + 1;
-                    else                     y1_i = y_int;
-
-                    x0_i = x_int;
-                    if (x_int + 1 <= in_w-1) x1_i = x_int + 1;
-                    else                     x1_i = x_int;
-
-                    // Parte fraccional (0..255)
-                    ty_q_i = ys_q & (ONE_Q - 1);
-                    tx_q_i = xs_q & (ONE_Q - 1);
-                    if (ty_q_i < 0)     ty_q_i = 0;
-                    if (ty_q_i > 255)   ty_q_i = 255;
-                    if (tx_q_i < 0)     tx_q_i = 0;
-                    if (tx_q_i > 255)   tx_q_i = 255;
-
-                    // Direcciones lineales: img[y][x] -> y*in_w + x
-                    rd_addr0 <= y0_i*in_w + x0_i;
-                    rd_addr1 <= y0_i*in_w + x1_i;
-                    rd_addr2 <= y1_i*in_w + x0_i;
-                    rd_addr3 <= y1_i*in_w + x1_i;
-
-                    state <= S_COMP;
-                end
-
-                //--------------------------------------------------
-                // S_COMP:
-                //--------------------------------------------------
-                S_COMP: begin
-                    // pesos
-                    wx0 = ONE_Q - tx_q_i;
-                    wy0 = ONE_Q - ty_q_i;
-
-                    w00 = wx0    * wy0;
-                    w10 = tx_q_i * wy0;
-                    w01 = wx0    * ty_q_i;
-                    w11 = tx_q_i * ty_q_i;
-
-                    acc = rd_data0*w00 +
-                          rd_data1*w10 +
-                          rd_data2*w01 +
-                          rd_data3*w11;
-
-                    // (acc + 2^15) >> 16  y clamp [0,255]
-                    pix = (acc + (1 << 15)) >>> 16;
-                    if (pix < 0)        pix = 0;
-                    else if (pix > 255) pix = 255;
-
-                    wr_addr  <= cur_y * out_w + cur_x;
-                    wr_data  <= pix[7:0];
-                    wr_valid <= 1'b1;
-
-                    // avanzar (cur_x,cur_y)
-                    if (cur_x + 1 < out_w) begin
-                        cur_x <= cur_x + 1;
-                        state <= S_ISSUE;
-                    end else begin
-                        cur_x <= 16'd0;
-                        if (cur_y + 1 < out_h) begin
-                            cur_y <= cur_y + 1;
-                            state <= S_ISSUE;
-                        end else begin
-                            // último píxel
+                    case (state)
+                        //--------------------------------------------------
+                        S_IDLE: begin
                             busy <= 1'b0;
-                            done <= 1'b1;
+                            if (start) begin
+                                busy  <= 1'b1;
+                                done  <= 1'b0;
+                                cur_x <= 16'd0;
+                                cur_y <= 16'd0;
+                                state <= S_ISSUE;
+                                $display("[CORE] START t=%0t out_w=%0d out_h=%0d", $time, out_w, out_h);
+                            end
+                        end
+
+                        //--------------------------------------------------
+                        S_ISSUE: begin
+                            // Índices enteros de salida
+                            yo_int = cur_y;
+                            xo_int = cur_x;
+
+                            // (yo + 0.5) en Q8.8
+                            yo_q = (yo_int << FRAC_BITS) + (ONE_Q/2);
+                            temp_q_y = (yo_q * inv_scale_q) >> FRAC_BITS;
+                            ys_q = temp_q_y - (ONE_Q/2);
+
+                            // (xo + 0.5) en Q8.8
+                            xo_q = (xo_int << FRAC_BITS) + (ONE_Q/2);
+                            temp_q_x = (xo_q * inv_scale_q) >> FRAC_BITS;
+                            xs_q = temp_q_x - (ONE_Q/2);
+
+                            // Parte entera (clamp a [0, in_h-1] / [0, in_w-1])
+                            y_int = ys_q >>> FRAC_BITS;
+                            if (y_int < 0)           y_int = 0;
+                            else if (y_int > in_h-1) y_int = in_h-1;
+
+                            x_int = xs_q >>> FRAC_BITS;
+                            if (x_int < 0)           x_int = 0;
+                            else if (x_int > in_w-1) x_int = in_w-1;
+
+                            y0_i = y_int;
+                            if (y_int + 1 <= in_h-1) y1_i = y_int + 1;
+                            else                     y1_i = y_int;
+
+                            x0_i = x_int;
+                            if (x_int + 1 <= in_w-1) x1_i = x_int + 1;
+                            else                     x1_i = x_int;
+
+                            // Parte fraccional (0..255)
+                            ty_q_i = ys_q & (ONE_Q - 1);
+                            tx_q_i = xs_q & (ONE_Q - 1);
+                            if (ty_q_i < 0)     ty_q_i = 0;
+                            if (ty_q_i > 255)   ty_q_i = 255;
+                            if (tx_q_i < 0)     tx_q_i = 0;
+                            if (tx_q_i > 255)   tx_q_i = 255;
+
+                            // Direcciones lineales: img[y][x] -> y*in_w + x
+                            rd_addr0 <= y0_i*in_w + x0_i;
+                            rd_addr1 <= y0_i*in_w + x1_i;
+                            rd_addr2 <= y1_i*in_w + x0_i;
+                            rd_addr3 <= y1_i*in_w + x1_i;
+
+                            state <= S_COMP;
+                        end
+
+                        //--------------------------------------------------
+                        S_COMP: begin
+                            // pesos
+                            wx0 = ONE_Q - tx_q_i;
+                            wy0 = ONE_Q - ty_q_i;
+
+                            w00 = wx0    * wy0;
+                            w10 = tx_q_i * wy0;
+                            w01 = wx0    * ty_q_i;
+                            w11 = tx_q_i * ty_q_i;
+
+                            acc = rd_data0*w00 +
+                                  rd_data1*w10 +
+                                  rd_data2*w01 +
+                                  rd_data3*w11;
+
+                            pix = (acc + (1 << 15)) >>> 16;
+                            if (pix < 0)        pix = 0;
+                            else if (pix > 255) pix = 255;
+
+                            wr_addr  <= cur_y * out_w + cur_x;
+                            wr_data  <= pix[7:0];
+                            wr_valid <= 1'b1;
+
+                            // avanzar (cur_x,cur_y)
+                            if (cur_x + 1 < out_w) begin
+                                cur_x <= cur_x + 1;
+                                state <= S_ISSUE;
+                            end else begin
+                                cur_x <= 16'd0;
+                                if (cur_y + 1 < out_h) begin
+                                    cur_y <= cur_y + 1;
+                                    state <= S_ISSUE;
+                                end else begin
+                                    busy <= 1'b0;
+                                    done <= 1'b1;
+                                    state <= S_IDLE;
+                                    $display("[CORE] DONE t=%0t", $time);
+                                end
+                            end
+                        end
+
+                        default: begin
                             state <= S_IDLE;
-                            $display("[CORE] DONE t=%0t", $time);
+                        end
+                    endcase
+
+                end else if (!step && step_ack) begin
+                    // Host bajó STEP -> limpiamos ACK, sin avanzar nada
+                    step_ack <= 1'b0;
+                end
+                // Si (step=0 & step_ack=0) o (step=1 & step_ack=1): no hacemos nada, estado se mantiene
+
+            end else begin
+                // ---------------------------
+                // Modo normal (sin stepping)
+                // ---------------------------
+                step_ack <= 1'b0;
+
+                case (state)
+                    S_IDLE: begin
+                        busy <= 1'b0;
+                        if (start) begin
+                            busy  <= 1'b1;
+                            done  <= 1'b0;
+                            cur_x <= 16'd0;
+                            cur_y <= 16'd0;
+                            state <= S_ISSUE;
+                            $display("[CORE] START t=%0t out_w=%0d out_h=%0d", $time, out_w, out_h);
                         end
                     end
-                end
 
-                default: begin
-                    state <= S_IDLE;
-                end
-            endcase
+                    S_ISSUE: begin
+                        yo_int = cur_y;
+                        xo_int = cur_x;
+
+                        yo_q = (yo_int << FRAC_BITS) + (ONE_Q/2);
+                        temp_q_y = (yo_q * inv_scale_q) >> FRAC_BITS;
+                        ys_q = temp_q_y - (ONE_Q/2);
+
+                        xo_q = (xo_int << FRAC_BITS) + (ONE_Q/2);
+                        temp_q_x = (xo_q * inv_scale_q) >> FRAC_BITS;
+                        xs_q = temp_q_x - (ONE_Q/2);
+
+                        y_int = ys_q >>> FRAC_BITS;
+                        if (y_int < 0)           y_int = 0;
+                        else if (y_int > in_h-1) y_int = in_h-1;
+
+                        x_int = xs_q >>> FRAC_BITS;
+                        if (x_int < 0)           x_int = 0;
+                        else if (x_int > in_w-1) x_int = in_w-1;
+
+                        y0_i = y_int;
+                        if (y_int + 1 <= in_h-1) y1_i = y_int + 1;
+                        else                     y1_i = y_int;
+
+                        x0_i = x_int;
+                        if (x_int + 1 <= in_w-1) x1_i = x_int + 1;
+                        else                     x1_i = x_int;
+
+                        ty_q_i = ys_q & (ONE_Q - 1);
+                        tx_q_i = xs_q & (ONE_Q - 1);
+                        if (ty_q_i < 0)     ty_q_i = 0;
+                        if (ty_q_i > 255)   ty_q_i = 255;
+                        if (tx_q_i < 0)     tx_q_i = 0;
+                        if (tx_q_i > 255)   tx_q_i = 255;
+
+                        rd_addr0 <= y0_i*in_w + x0_i;
+                        rd_addr1 <= y0_i*in_w + x1_i;
+                        rd_addr2 <= y1_i*in_w + x0_i;
+                        rd_addr3 <= y1_i*in_w + x1_i;
+
+                        state <= S_COMP;
+                    end
+
+                    S_COMP: begin
+                        wx0 = ONE_Q - tx_q_i;
+                        wy0 = ONE_Q - ty_q_i;
+
+                        w00 = wx0    * wy0;
+                        w10 = tx_q_i * wy0;
+                        w01 = wx0    * ty_q_i;
+                        w11 = tx_q_i * ty_q_i;
+
+                        acc = rd_data0*w00 +
+                              rd_data1*w10 +
+                              rd_data2*w01 +
+                              rd_data3*w11;
+
+                        pix = (acc + (1 << 15)) >>> 16;
+                        if (pix < 0)        pix = 0;
+                        else if (pix > 255) pix = 255;
+
+                        wr_addr  <= cur_y * out_w + cur_x;
+                        wr_data  <= pix[7:0];
+                        wr_valid <= 1'b1;
+
+                        if (cur_x + 1 < out_w) begin
+                            cur_x <= cur_x + 1;
+                            state <= S_ISSUE;
+                        end else begin
+                            cur_x <= 16'd0;
+                            if (cur_y + 1 < out_h) begin
+                                cur_y <= cur_y + 1;
+                                state <= S_ISSUE;
+                            end else begin
+                                busy <= 1'b0;
+                                done <= 1'b1;
+                                state <= S_IDLE;
+                                $display("[CORE] DONE t=%0t", $time);
+                            end
+                        end
+                    end
+
+                    default: begin
+                        state <= S_IDLE;
+                    end
+                endcase
+            end
         end
     end
 

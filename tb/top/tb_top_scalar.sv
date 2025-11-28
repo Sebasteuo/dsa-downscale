@@ -1,5 +1,6 @@
 // tb/top/tb_top_scalar.v
 // Testbench de tope: usa bilinear_core_scalar sobre un RAW 32x32 con scale=0.5
+// Ahora con soporte para stepping STEP / STEP_ACK.
 
 `timescale 1ns/1ps
 
@@ -11,7 +12,10 @@ module tb_top_scalar;
   localparam OUT_W = 16;
   localparam OUT_H = 16;
 
-  // BRAM 
+  // 0 = corre normal, 1 = stepping
+  localparam USE_STEPPING = 1'b0;
+
+  // BRAM
   reg [7:0] img_in  [0:IN_W*IN_H-1];   // 0..1023
   reg [7:0] img_out [0:OUT_W*OUT_H-1]; // 0..255
 
@@ -31,6 +35,11 @@ module tb_top_scalar;
   reg [15:0] out_w, out_h;
   reg [15:0] inv_scale_q;  // Q8.8 de 1/scale
 
+  // Stepping hacia el core
+  reg  step_mode;
+  reg  step;
+  wire step_ack;
+
   // Interface hacia el core
   wire        busy, done;
   wire [31:0] rd_addr0, rd_addr1, rd_addr2, rd_addr3;
@@ -45,15 +54,24 @@ module tb_top_scalar;
   bilinear_core_scalar core_u (
     .clk         (clk),
     .rst_n       (rst_n),
+
     .start       (start),
     .in_w        (in_w),
     .in_h        (in_h),
     .out_w       (out_w),
     .out_h       (out_h),
     .inv_scale_q (inv_scale_q),
+
+    // stepping
+    .step_mode   (step_mode),
+    .step        (step),
+    .step_ack    (step_ack),
+
+    // estado
     .busy        (busy),
     .done        (done),
 
+    // memoria
     .rd_addr0    (rd_addr0),
     .rd_addr1    (rd_addr1),
     .rd_addr2    (rd_addr2),
@@ -96,8 +114,11 @@ module tb_top_scalar;
     $display("[TB] Inicio de simulacion t=%0t", $time);
 
     // Reset
-    rst_n = 0;
-    start = 0;
+    rst_n     = 0;
+    start     = 0;
+    step_mode = USE_STEPPING;
+    step      = 0;
+
     repeat (5) @(posedge clk);
     rst_n = 1;
     $display("[TB] Reset liberado t=%0t", $time);
@@ -130,6 +151,7 @@ module tb_top_scalar;
     $display("[TB] Input:  %0dx%0d", IN_W, IN_H);
     $display("[TB] Output: %0dx%0d", OUT_W, OUT_H);
     $display("[TB] inv_scale_q (Q8.8) = %0d", inv_scale_q);
+    $display("[TB] step_mode = %0d", step_mode);
 
     // Disparar el core
     @(posedge clk);
@@ -138,13 +160,32 @@ module tb_top_scalar;
     @(posedge clk);
     start <= 0;
 
-    // Esperar done con límite de ciclos
     ciclos = 0;
-    $display("[TB] Esperando done...");
 
-    while (!done && ciclos < 20000) begin
-      @(posedge clk);
-      ciclos = ciclos + 1;
+    if (!USE_STEPPING) begin
+      // ------------ MODO NORMAL ------------
+      $display("[TB] Esperando done (modo normal)...");
+      while (!done && ciclos < 20000) begin
+        @(posedge clk);
+        ciclos = ciclos + 1;
+      end
+    end else begin
+      // ------------ MODO STEPPING ------------
+      $display("[TB] Esperando done (modo stepping)...");
+      while (!done && ciclos < 20000) begin
+        // 1) pedir paso
+        step = 1'b1;
+        // 2) esperar a que el core lo consuma
+        @(posedge clk);
+        while (step_ack == 1'b0) @(posedge clk);
+        
+        // 3) bajar step
+        step = 1'b0;
+        @(posedge clk);
+        while (step_ack == 1'b1) @(posedge clk);  // esperar que el core limpie ACK
+
+        ciclos = ciclos + 1;
+      end
     end
 
     if (!done) begin
