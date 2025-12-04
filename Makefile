@@ -122,3 +122,11 @@ sim_scalar_check:
 
 verify_all:
 	$(PY) tests/run_all_tests.py
+
+.PHONY: golden_cpp
+
+golden_cpp:
+	./downscale_ref_cpp --in vectors/patterns/grad_32x32.raw \
+	  --w 32 --h 32 --scale 0.5 \
+	  --out-raw results/out_cpp_s05.raw \
+	  --out-pgm results/out_cpp_s05.pgm
