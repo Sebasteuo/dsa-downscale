@@ -1,7 +1,7 @@
 // dsa_jtag_driver.cpp
 //
 // Wrapper en C++ para:
-//  - ejecutar el downscale de referencia en CPU (modelo "igual" al core HW),
+//  - ejecutar el downscale de referencia en CPU (modelo bilineal igual al core),
 //  - llamar a system-console + Tcl para ejecutar el core en FPGA,
 //  - comparar la salida HW vs referencia (píxel a píxel).
 //
@@ -9,9 +9,9 @@
 //   ./dsa_jtag_driver <img_w> <img_h> <scale_hex> <in_raw> <out_hw_raw>
 //
 // Ejemplo:
-//   ./dsa_jtag_driver 32 32 0x000000C0 ../pc/entrada_32x32.raw ../pc/salida_32x32_075.raw
+//   ./dsa_jtag_driver 32 32 0x00000080 ../pc/entrada_32x32.raw ../pc/salida_32x32_05.raw
 //
-// NOTA: ajusta SC_BIN, PROJ_DIR y TCL_SCRIPT a tu entorno real.
+// NOTA: ajustar SC_BIN, PROJ_DIR y TCL_SCRIPT a tu entorno real.
 
 #include <iostream>
 #include <fstream>
@@ -22,12 +22,15 @@
 #include <cstdint>
 #include <cstdlib>
 #include <stdexcept>
+#include <cmath>
 
 // -----------------------------------------------------------------------------
 // CONFIGURACIÓN: ajusta estas rutas a tu entorno
 // -----------------------------------------------------------------------------
-
-// Ruta al system-console (ya probada por ti)
+// helpers por si el compilador no trae std::round en el namespace
+static inline double my_floor(double x) { return std::floor(x); }
+static inline double my_round(double x) { return std::floor(x + 0.5); }
+// Ruta al system-console (ya probada por Randall en su máquina)
 static const std::string SC_BIN =
     "/home/hack/altera_lite/25.1std/quartus/sopc_builder/bin/system-console";
 
@@ -39,16 +42,21 @@ static const std::string PROJ_DIR =
 static const std::string TCL_SCRIPT =
     "../jtag/dsa_jtag_downscale_raw.tcl";
 
-// Límite actual del core en HW (ahora mismo tu dsa_top_seq usa 64x64)
+// Límite actual del core en HW (por ahora 64x64)
 static const int HW_IMG_MAX_W = 64;
 static const int HW_IMG_MAX_H = 64;
 
 // -----------------------------------------------------------------------------
-// Utilidades para RAW
+// Utilidades simples
 // -----------------------------------------------------------------------------
 
+static uint8_t clamp_u8(int x) {
+    if (x < 0)   return 0;
+    if (x > 255) return 255;
+    return static_cast<uint8_t>(x);
+}
+
 // Lee un .raw de w*h bytes (8 bits por píxel, gris)
-// Si el archivo tiene menos bytes, rellena con 0 y avisa.
 std::vector<uint8_t> load_raw(const std::string &path, int w, int h)
 {
     int total = w * h;
@@ -85,7 +93,7 @@ bool save_raw(const std::string &path, const std::vector<uint8_t> &img)
 }
 
 // -----------------------------------------------------------------------------
-// Modelo de referencia C++ "igual" al core HW (modo 1)
+// Dimensiones de salida iguales al HW (modo 1)
 // -----------------------------------------------------------------------------
 
 // Calcula out_w y out_h igual que en dsa_top_seq (modo 1)
@@ -126,9 +134,11 @@ static void compute_out_dims_hw_like(
     out_h = oh;
 }
 
-// Modelo de referencia "literal" del modo 1 del core.
-// Devuelve el buffer de salida y además retorna out_w/out_h por referencia.
-std::vector<uint8_t> downscale_ref_hw_like(
+// -----------------------------------------------------------------------------
+// Modelo de referencia bilineal en C++ (igual al Python/ref_cpp)
+// -----------------------------------------------------------------------------
+
+std::vector<uint8_t> downscale_ref_bilinear(
     int img_w, int img_h,
     uint32_t scale_q8_8,
     const std::vector<uint8_t> &src,
@@ -144,104 +154,58 @@ std::vector<uint8_t> downscale_ref_hw_like(
         std::cerr << "WARNING: src.size() < img_w*img_h, se asumirá 0 para faltantes.\n";
     }
 
-    // Dimensiones de salida igual que en HW
+    // Dimensiones de salida iguales que en HW
     compute_out_dims_hw_like(img_w, img_h, scale_q8_8, out_w, out_h);
 
-    std::vector<uint8_t> dst;
-    dst.reserve(out_w * out_h);
+    // escala en double (por ejemplo 0.5 si scale_q8_8 = 0x80)
+    double scale = static_cast<double>(scale_q8_8) / 256.0;
 
-    // Variables "clon" del HDL
-    int ds_out_x = 0;
-    int ds_out_y = 0;
-    int ds_in_x = 0;
-    int ds_in_y = 0;
-    int err_x = 0;
-    int err_y = 0;
+    std::vector<uint8_t> dst(out_w * out_h, 0);
 
-    // Bucle equivalente a S_RUN (modo 1) pero trabajando a nivel de píxel
-    while (true)
-    {
-        // 1) Muestreo: idx_in = ds_in_y * img_w + ds_in_x
-        int idx_in = ds_in_y * img_w + ds_in_x;
-        uint8_t pix = 0;
+    auto at = [&](int x, int y) -> uint8_t {
+        if (x < 0) x = 0;
+        if (x >= img_w) x = img_w - 1;
+        if (y < 0) y = 0;
+        if (y >= img_h) y = img_h - 1;
+        int idx = y * img_w + x;
+        if (idx < 0 || idx >= total_pix) return 0;
+        return src[idx];
+    };
 
-        if (idx_in >= 0 && idx_in < total_pix)
-        {
-            pix = src[idx_in];
-        }
-        else
-        {
-            // Si se sale del rango, colocamos 0; si esto pasa, es síntoma de bug HW.
-            pix = 0;
-        }
+    for (int yo = 0; yo < out_h; ++yo) {
+        double ys = (static_cast<double>(yo) + 0.5) / scale - 0.5;
+        int y0 = static_cast<int>(my_floor(ys));
+        if (y0 < 0) y0 = 0;
+        if (y0 > img_h - 1) y0 = img_h - 1;
+        int y1 = (y0 + 1 < img_h) ? y0 + 1 : y0;
+        double ty = ys - y0;
+        int ty_q = std::min(255, static_cast<int>(my_round(ty * 256.0))); // Q8.8
 
-        dst.push_back(pix);
+        for (int xo = 0; xo < out_w; ++xo) {
+            double xs = (static_cast<double>(xo) + 0.5) / scale - 0.5;
+            int x0 = static_cast<int>(my_floor(xs));
+            if (x0 < 0) x0 = 0;
+            if (x0 > img_w - 1) x0 = img_w - 1;
+            int x1 = (x0 + 1 < img_w) ? x0 + 1 : x0;
+            double tx = xs - x0;
+            int tx_q = std::min(255, static_cast<int>(my_round(tx * 256.0))); // Q8.8
 
-        // ¿Último píxel?
-        bool last_pixel = (ds_out_y == out_h - 1) && (ds_out_x == out_w - 1);
-        if (last_pixel)
-        {
-            break;
-        }
+            int I00 = at(x0, y0);
+            int I10 = at(x1, y0);
+            int I01 = at(x0, y1);
+            int I11 = at(x1, y1);
 
-        // ¿Fin de fila?
-        bool end_row = (ds_out_x == out_w - 1);
+            int wx0 = 256 - tx_q;
+            int wy0 = 256 - ty_q;
 
-        if (end_row)
-        {
-            // --- Fin de fila de salida ---
+            long long acc = 0;
+            acc += 1LL * I00 * wx0 * wy0;
+            acc += 1LL * I10 * tx_q * wy0;
+            acc += 1LL * I01 * wx0 * ty_q;
+            acc += 1LL * I11 * tx_q * ty_q;
 
-            // Reiniciar X de salida
-            ds_out_x = 0;
-            // Avanzar Y de salida
-            ds_out_y += 1;
-
-            // Reiniciar mapeo horizontal
-            ds_in_x = 0;
-            err_x = 0;
-
-            // Bresenham vertical (igual estructura que en el HDL)
-            int tmp_err_y = err_y + img_h;
-            int tmp_in_y = ds_in_y;
-
-            if (tmp_err_y >= out_h)
-            {
-                tmp_err_y -= out_h;
-                tmp_in_y += 1;
-                // Segundo paso opcional
-                if (tmp_err_y >= out_h)
-                {
-                    tmp_err_y -= out_h;
-                    tmp_in_y += 1;
-                }
-            }
-
-            err_y = tmp_err_y;
-            ds_in_y = tmp_in_y;
-        }
-        else
-        {
-            // --- Misma fila de salida ---
-            ds_out_x += 1;
-
-            // Bresenham horizontal
-            int tmp_err_x = err_x + img_w;
-            int tmp_in_x = ds_in_x;
-
-            if (tmp_err_x >= out_w)
-            {
-                tmp_err_x -= out_w;
-                tmp_in_x += 1;
-                if (tmp_err_x >= out_w)
-                {
-                    tmp_err_x -= out_w;
-                    tmp_in_x += 1;
-                }
-            }
-
-            err_x = tmp_err_x;
-            ds_in_x = tmp_in_x;
-            // ds_in_y no cambia aquí
+            acc = (acc + (1LL << 15)) >> 16; // redondeo Q16.16 -> Q8.8
+            dst[yo * out_w + xo] = clamp_u8(static_cast<int>(acc));
         }
     }
 
@@ -249,34 +213,33 @@ std::vector<uint8_t> downscale_ref_hw_like(
 }
 
 // -----------------------------------------------------------------------------
-// Wrapper para llamar system-console + Tcl
+// Llamada a system-console + Tcl
 // -----------------------------------------------------------------------------
 
-bool run_system_console(
+// Ejecuta el Tcl para correr el DSA en HW.
+// La idea es que el script Tcl reciba:
+//   PROJ_DIR img_w img_h scale_hex in_raw out_raw
+static bool run_system_console(
     int img_w, int img_h,
     const std::string &scale_hex,
     const std::string &in_raw,
     const std::string &out_raw)
 {
-    // Pasamos los argumentos igual que hacías a mano:
-    //   system-console --project-dir PROJ_DIR --script=TCL_SCRIPT -- \
-    //       PROJ_DIR img_w img_h scale_hex in_raw out_raw
     std::ostringstream cmd;
-    cmd << "\"" << SC_BIN << "\""
-        << " --project-dir " << "\"" << PROJ_DIR << "\""
-        << " --script=" << "\"" << TCL_SCRIPT << "\""
-        << " -- "
-        << img_w << " "
-        << img_h << " "
-        << scale_hex << " "
-        << in_raw << " "
-        << out_raw;
+    cmd << SC_BIN
+        << " -cli --script=" << TCL_SCRIPT
+        << " " << PROJ_DIR
+        << " " << img_w
+        << " " << img_h
+        << " " << scale_hex
+        << " " << in_raw
+        << " " << out_raw;
 
-    std::string cmd_str = cmd.str();
-    std::cout << "[C++] Ejecutando system-console:\n"
-              << cmd_str << "\n";
+    std::cout << "------------------------------------------------\n";
+    std::cout << "Ejecutando system-console con:\n  " << cmd.str() << "\n";
+    std::cout << "------------------------------------------------\n";
 
-    int ret = std::system(cmd_str.c_str());
+    int ret = std::system(cmd.str().c_str());
     if (ret != 0)
     {
         std::cerr << "ERROR: system-console devolvió código " << ret << "\n";
@@ -286,156 +249,118 @@ bool run_system_console(
 }
 
 // -----------------------------------------------------------------------------
-// Comparación HW vs referencia
-// -----------------------------------------------------------------------------
-
-void compare_images(
-    const std::vector<uint8_t> &ref,
-    const std::vector<uint8_t> &hw,
-    int out_w,
-    int out_h)
-{
-    int total = std::min(ref.size(), hw.size());
-    int mismatches = 0;
-
-    for (int i = 0; i < total; ++i)
-    {
-        if (ref[i] != hw[i])
-        {
-            if (mismatches < 20)
-            {
-                int y = (out_w > 0) ? (i / out_w) : 0;
-                int x = (out_w > 0) ? (i % out_w) : 0;
-                std::cout << "Mismatch en pixel " << i
-                          << " (x=" << x << ", y=" << y << "): "
-                          << "REF=0x" << std::hex << std::setw(2) << std::setfill('0')
-                          << (int)ref[i]
-                          << " HW=0x" << std::setw(2)
-                          << (int)hw[i]
-                          << std::dec << "\n";
-            }
-            mismatches++;
-        }
-    }
-
-    if (ref.size() != hw.size())
-    {
-        std::cout << "WARNING: tamaños distintos ref=" << ref.size()
-                  << " hw=" << hw.size() << " (se comparó hasta min).\n";
-    }
-
-    if (mismatches == 0)
-    {
-        std::cout << "[OK] HW y referencia coinciden (" << out_w << "x" << out_h
-                  << ", " << ref.size() << " píxeles).\n";
-    }
-    else
-    {
-        std::cout << "[FAIL] Se encontraron " << mismatches
-                  << " mismatches (se muestran hasta 20).\n";
-    }
-}
-
-// -----------------------------------------------------------------------------
-// main
+// Comparación y main()
 // -----------------------------------------------------------------------------
 
 int main(int argc, char **argv)
 {
     if (argc != 6)
     {
-        std::cerr << "Uso:\n"
-                  << "  " << argv[0]
-                  << " <img_w> <img_h> <scale_hex> <in_raw> <out_hw_raw>\n\n"
-                  << "Ejemplo:\n"
-                  << "  " << argv[0]
-                  << " 32 32 0x000000C0 ../pc/entrada_32x32.raw ../pc/salida_32x32_075.raw\n";
+        std::cerr << "Uso:\n  " << argv[0]
+                  << " <img_w> <img_h> <scale_hex> <in_raw> <out_hw_raw>\n\n";
         return 1;
     }
 
-    int img_w = std::atoi(argv[1]);
-    int img_h = std::atoi(argv[2]);
+    int img_w = std::stoi(argv[1]);
+    int img_h = std::stoi(argv[2]);
     std::string scale_hex = argv[3];
     std::string in_raw = argv[4];
     std::string out_hw = argv[5];
 
-    if (img_w <= 0 || img_h <= 0)
-    {
-        std::cerr << "ERROR: img_w e img_h deben ser positivos.\n";
-        return 1;
-    }
-    if (img_w > HW_IMG_MAX_W || img_h > HW_IMG_MAX_H)
-    {
-        std::cerr << "ATENCIÓN: img_w/img_h exceden HW_IMG_MAX_W/H ("
-                  << HW_IMG_MAX_W << "x" << HW_IMG_MAX_H << ").\n"
-                  << "         El HW puede saturar o fallar, pero sigo.\n";
-    }
+    std::cout << "Args brutos recibidos: "
+              << img_w << " " << img_h << " " << scale_hex
+              << " " << in_raw << " " << out_hw << "\n";
 
-    uint32_t scale_q8_8 = 0;
-    try
-    {
-        scale_q8_8 = static_cast<uint32_t>(std::stoul(scale_hex, nullptr, 16));
-    }
-    catch (...)
-    {
-        std::cerr << "ERROR: no se pudo parsear scale_hex=" << scale_hex
-                  << " como hexadecimal.\n";
-        return 1;
-    }
-
-    std::cout << "-------------------------------------------------\n";
-    std::cout << "Parámetros:\n";
+    std::cout << "Parametros:\n";
     std::cout << "  img_w      = " << img_w << "\n";
     std::cout << "  img_h      = " << img_h << "\n";
-    std::cout << "  scale_q8_8 = 0x" << std::hex << std::setw(8) << std::setfill('0')
-              << scale_q8_8 << std::dec << "\n";
-    std::cout << "  in_raw     = " << in_raw << "\n";
-    std::cout << "  out_hw_raw = " << out_hw << "\n";
-    std::cout << "-------------------------------------------------\n";
 
-    // 1) Leer imagen de entrada
-    auto src = load_raw(in_raw, img_w, img_h);
-
-    // 2) Ejecutar modelo de referencia "igual al HW"
-    int out_w_ref = 0, out_h_ref = 0;
-    std::vector<uint8_t> ref_out;
-    try
-    {
-        ref_out = downscale_ref_hw_like(
-            img_w, img_h, scale_q8_8, src,
-            out_w_ref, out_h_ref);
-    }
-    catch (const std::exception &e)
-    {
-        std::cerr << "ERROR en modelo de referencia: " << e.what() << "\n";
+    uint32_t scale_q8_8 = 0;
+    try {
+        scale_q8_8 = static_cast<uint32_t>(
+            std::stoul(scale_hex, nullptr, 16));
+    } catch (const std::exception &e) {
+        std::cerr << "ERROR: no se pudo parsear scale_hex=" << scale_hex
+                  << " (" << e.what() << ")\n";
         return 1;
     }
 
-    std::cout << "Referencia C++: out_w=" << out_w_ref
-              << ", out_h=" << out_h_ref
-              << ", pix=" << ref_out.size() << "\n";
+    std::cout << "  scale_q8_8 = 0x"
+              << std::hex << std::setw(8) << std::setfill('0')
+              << scale_q8_8 << std::dec << "\n";
+    std::cout << "  input RAW  = " << in_raw << "\n";
+    std::cout << "  output RAW = " << out_hw << "\n";
 
-    // Guardar también la referencia, si quieres
-    std::string out_ref = out_hw + ".ref.raw";
-    if (save_raw(out_ref, ref_out))
-    {
-        std::cout << "Referencia escrita en: " << out_ref << "\n";
+    // 1) Cargar imagen de entrada
+    auto src = load_raw(in_raw, img_w, img_h);
+
+    // 2) Ejecutar referencia bilineal en CPU
+    int ref_w = 0, ref_h = 0;
+    std::vector<uint8_t> ref_out;
+    try {
+        ref_out = downscale_ref_bilinear(
+            img_w, img_h, scale_q8_8, src,
+            ref_w, ref_h);
+    } catch (const std::exception &e) {
+        std::cerr << "ERROR en referencia bilineal: " << e.what() << "\n";
+        return 1;
     }
 
-    // 3) Ejecutar HW vía system-console + Tcl
+    // Guardar referencia opcionalmente si se quiere inspeccionar
+    save_raw("ref_out.raw", ref_out);
+    std::cout << "Ref: salida " << ref_w << "x" << ref_h
+              << " escrita en ref_out.raw\n";
+
+    // 3) Ejecutar el HW via system-console + Tcl
     if (!run_system_console(img_w, img_h, scale_hex, in_raw, out_hw))
     {
         std::cerr << "ERROR: fallo al invocar system-console.\n";
         return 1;
     }
 
-    // 4) Leer la salida de HW (mismo tamaño que la referencia)
-    auto hw_out = load_raw(out_hw, out_w_ref, out_h_ref);
+    // 4) Cargar salida de HW
+    auto hw_out = load_raw(out_hw, ref_w, ref_h);
     std::cout << "HW: leídos " << hw_out.size()
               << " bytes desde " << out_hw << "\n";
 
-    // 5) Comparar HW vs referencia
-    compare_images(ref_out, hw_out, out_w_ref, out_h_ref);
+    // 5) Comparar píxel a píxel
+    if (hw_out.size() != ref_out.size())
+    {
+        std::cerr << "WARNING: hw_out.size() != ref_out.size()\n";
+    }
 
-    return 0;
+    int total = std::min<int>(hw_out.size(), ref_out.size());
+    int mismatches = 0;
+
+    for (int i = 0; i < total; ++i)
+    {
+        uint8_t ref = ref_out[i];
+        uint8_t hw  = hw_out[i];
+        if (ref != hw)
+        {
+            if (mismatches < 20)
+            {
+                int x = i % ref_w;
+                int y = i / ref_w;
+                std::cout << "Mismatch en pixel " << i
+                          << " (x=" << x << ", y=" << y << "): "
+                          << "REF=0x" << std::hex << std::setw(2) << std::setfill('0') << (int)ref
+                          << " HW=0x"  << std::setw(2) << (int)hw
+                          << std::dec << "\n";
+            }
+            mismatches++;
+        }
+    }
+
+    if (mismatches == 0)
+    {
+        std::cout << "[OK] HW coincide con referencia bilineal.\n";
+        return 0;
+    }
+    else
+    {
+        std::cout << "[FAIL] Se encontraron " << mismatches
+                  << " mismatches (se muestran hasta 20).\n";
+        return 1;
+    }
 }
