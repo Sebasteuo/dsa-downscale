@@ -19,13 +19,7 @@ __pycache__/
 # Vscode
 .vscode/*
 # Quartus
-tb/quartus/db/*
-tb/quartus/.qsys_edit/*
-tb/quartus/HDL/*
-tb/quartus/output_files/*
-tb/quartus/DSA.sv.bak
-tb/quartus/dsa_avalon_slave_hw.tcl
-tb/quartus/dsa_jtag_sys.qsys
-tb/quartus/DSA.qsf
-tb/quartus/DSA.qpf
-tb/quartus/dsa_jtag_sys.sopcinfo
+tb/JTAG/dsa/pc/dsa_jtag_driver
+tb/JTAG/dsa/quartus/incremental_db
+tb/JTAG/dsa/quartus/output_files
+tb/JTAG/dsa/quartus/simulation

@@ -1,0 +1,248 @@
+// /quartus/dsa/hw/top/dsa_top_seq.sv
+//
+// Etapa 1: top lógico de la DSA (solo modo secuencial que copia entrada -> salida).
+// - Usa BRAM interna modelada como arreglos de 32 bits.
+// - Registros accesibles vía bus simple h_*.
+// - El core recorre todas las palabras válidas y copia in_mem -> out_mem.
+// - PERF_CYC cuenta ciclos en estado RUN.
+// - PERF_PIX = IMG_W * IMG_H (píxeles procesados).
+
+module dsa_top_seq #(
+  parameter int ADDR_WIDTH = 16  // ancho de h_addr
+) (
+  input  logic                  clk,
+  input  logic                  rst_n,
+
+  // Bus simple desde el esclavo Avalon
+  input  logic                  h_wr_en,
+  input  logic                  h_rd_en,
+  input  logic [ADDR_WIDTH-1:0] h_addr,
+  input  logic [31:0]           h_wdata,
+  output logic [31:0]           h_rdata,
+  output logic                  h_rvalid
+);
+
+  // ---------------------------------------------------------
+  // Parámetros y memoria
+  // ---------------------------------------------------------
+  localparam int MAX_WORDS = 1 << 16; // 65536 palabras x 32 bits = 2 Mbits por BRAM
+
+  // BRAM de entrada y salida (palabra de 32 bits = 4 píxeles)
+  logic [31:0] in_mem  [0:MAX_WORDS-1];
+  logic [31:0] out_mem [0:MAX_WORDS-1];
+
+  // ---------------------------------------------------------
+  // Registros de configuración / estado
+  // ---------------------------------------------------------
+  // Mapa de índices
+  localparam logic [15:0] REG_CTRL      = 16'h0000;
+  localparam logic [15:0] REG_STATUS    = 16'h0001;
+  localparam logic [15:0] REG_IMG_W     = 16'h0002;
+  localparam logic [15:0] REG_IMG_H     = 16'h0003;
+  localparam logic [15:0] REG_SCALE     = 16'h0004;
+  localparam logic [15:0] REG_MODE      = 16'h0005;
+  localparam logic [15:0] REG_PERF_CYC  = 16'h0006;
+  localparam logic [15:0] REG_PERF_PIX  = 16'h0007;
+
+  localparam logic [15:0] REG_IN_ADDR   = 16'h0020;
+  localparam logic [15:0] REG_IN_DATA   = 16'h0021;
+  localparam logic [15:0] REG_OUT_ADDR  = 16'h0030;
+  localparam logic [15:0] REG_OUT_DATA  = 16'h0031;
+
+  // Config
+  logic [15:0] img_w;
+  logic [15:0] img_h;
+  logic [15:0] scale_q8_8;
+  logic [7:0]  mode;
+
+  // Direcciones host para BRAM
+  logic [15:0] in_ptr;
+  logic [15:0] out_ptr;
+
+  // Status
+  logic busy;
+  logic done;
+
+  // Performance
+  logic [31:0] perf_cyc;
+  logic [31:0] perf_pix;
+
+  // Core FSM
+  typedef enum logic [1:0] {
+    S_IDLE,
+    S_RUN,
+    S_DONE
+  } core_state_t;
+
+  core_state_t state;
+
+  logic [15:0] word_idx;   // índice de palabra actual
+  logic [15:0] word_count; // total de palabras a procesar
+
+  // Pulso de start detectado en escritura a REG_CTRL
+  logic start_req;
+
+  // ---------------------------------------------------------
+  // Escrituras desde el host + core FSM
+  // ---------------------------------------------------------
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      // Reset síncrono
+      img_w      <= 16'd0;
+      img_h      <= 16'd0;
+      scale_q8_8 <= 16'd0;
+      mode       <= 8'd0;
+
+      in_ptr     <= 16'd0;
+      out_ptr    <= 16'd0;
+
+      busy       <= 1'b0;
+      done       <= 1'b0;
+
+      perf_cyc   <= 32'd0;
+      perf_pix   <= 32'd0;
+
+      state      <= S_IDLE;
+      word_idx   <= 16'd0;
+      word_count <= 16'd0;
+
+      start_req  <= 1'b0;
+    end else begin
+      // Por defecto, el pulso start_req dura 1 ciclo
+      start_req <= 1'b0;
+
+      // -----------------------------
+      // Escrituras del host
+      // -----------------------------
+      if (h_wr_en) begin
+        unique case (h_addr)
+          REG_IMG_W:    img_w      <= h_wdata[15:0];
+          REG_IMG_H:    img_h      <= h_wdata[15:0];
+          REG_SCALE:    scale_q8_8 <= h_wdata[15:0];
+          REG_MODE:     mode       <= h_wdata[7:0];
+
+          REG_IN_ADDR:  in_ptr     <= h_wdata[15:0];
+
+          REG_IN_DATA: begin
+            // Escritura de dato en BRAM de entrada y autoincremento
+            in_mem[in_ptr] <= h_wdata;
+            in_ptr         <= in_ptr + 16'd1;
+          end
+
+          REG_OUT_ADDR: out_ptr    <= h_wdata[15:0];
+
+          REG_CTRL: begin
+            // bit0 = START, genera pulso para la FSM
+            if (h_wdata[0])
+              start_req <= 1'b1;
+          end
+
+          default: ;
+        endcase
+      end
+
+      // -----------------------------
+      // Lecturas que implican side-effect (OUT_DATA -> out_ptr++)
+      // -----------------------------
+      if (h_rd_en && (h_addr == REG_OUT_DATA)) begin
+        out_ptr <= out_ptr + 16'd1;
+      end
+
+      // -----------------------------
+      // FSM del core (copia in_mem -> out_mem)
+      // -----------------------------
+      unique case (state)
+        S_IDLE: begin
+          busy <= 1'b0;
+          done <= 1'b0;
+
+          if (start_req) begin
+            // Calcula número de píxeles y palabras a procesar
+            logic [31:0] total_pix;
+            total_pix = img_w * img_h; // hasta 512x512 cabe en 32 bits
+
+            perf_pix   <= total_pix;
+            perf_cyc   <= 32'd0;
+
+            // número de palabras = ceil(total_pix / 4)
+            word_count <= (total_pix + 3) >> 2;
+            word_idx   <= 16'd0;
+
+            busy       <= 1'b1;
+            done       <= 1'b0;
+            state      <= S_RUN;
+          end
+        end
+
+        S_RUN: begin
+          // Cuenta ciclos mientras corre
+          perf_cyc <= perf_cyc + 32'd1;
+
+          if (word_idx < word_count) begin
+            // Etapa 1: copia directa palabra a palabra
+            out_mem[word_idx] <= in_mem[word_idx];
+            word_idx          <= word_idx + 16'd1;
+          end else begin
+            // Termina
+            busy  <= 1'b0;
+            done  <= 1'b1;
+            state <= S_DONE;
+          end
+        end
+
+        S_DONE: begin
+          // Mantiene DONE hasta nuevo START
+          if (start_req) begin
+            // Re-inicia con la nueva config
+            logic [31:0] total_pix;
+            total_pix = img_w * img_h;
+
+            perf_pix   <= total_pix;
+            perf_cyc   <= 32'd0;
+
+            word_count <= (total_pix + 3) >> 2;
+            word_idx   <= 16'd0;
+
+            busy       <= 1'b1;
+            done       <= 1'b0;
+            state      <= S_RUN;
+          end
+        end
+
+        default: state <= S_IDLE;
+      endcase
+    end
+  end
+
+  // ---------------------------------------------------------
+  // Lecturas desde el host
+  // ---------------------------------------------------------
+  always_comb begin
+    h_rdata  = 32'd0;
+
+    unique case (h_addr)
+      REG_STATUS: begin
+        // bit0 = BUSY, bit1 = DONE
+        h_rdata = {30'd0, done, busy};
+      end
+
+      REG_IMG_W:    h_rdata = {16'd0, img_w};
+      REG_IMG_H:    h_rdata = {16'd0, img_h};
+      REG_SCALE:    h_rdata = {16'd0, scale_q8_8};
+      REG_MODE:     h_rdata = {24'd0, mode};
+
+      REG_PERF_CYC: h_rdata = perf_cyc;
+      REG_PERF_PIX: h_rdata = perf_pix;
+
+      REG_IN_ADDR:  h_rdata = {16'd0, in_ptr};
+      REG_OUT_ADDR: h_rdata = {16'd0, out_ptr};
+
+      REG_OUT_DATA: h_rdata = out_mem[out_ptr];
+
+      default: ;
+    endcase
+  end
+
+  assign h_rvalid = h_rd_en;
+
+endmodule
