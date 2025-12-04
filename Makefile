@@ -94,3 +94,31 @@ simd_check:
 	$(PY) pc/compare.py --wa $$W2 --ha $$H2 --wb $$W2 --hb $$H2 \
 	  --a results/out_hw_simd.raw \
 	  --b vectors/golden/grad_32_s05.raw
+
+.PHONY: sim_scalar_run sim_scalar_check
+
+# corre la simulacion del core secuencial y genera results/out_hw.raw
+sim_scalar_run:
+	@if command -v iverilog >/dev/null 2>&1; then \
+		iverilog -g2012 -o tb_top_scalar_tb \
+		  tb/top/tb_top_scalar.sv \
+		  tb/rtl/bilinear_top.sv \
+		  tb/rtl/bilinear_core_scalar.sv \
+		  tb/rtl/bilinear_core_simd.sv && \
+		vvp tb_top_scalar_tb; \
+	else \
+		echo "no hay iverilog instalado, se omite sim_scalar_run"; \
+	fi
+
+# compara salida escalar contra golden (32x32 con escala 0.5)
+sim_scalar_check:
+	@W2=`$(PY) scripts/calc_dims.py --w 32 --h 32 --scale 0.5 | cut -d' ' -f1`; \
+	H2=`$(PY) scripts/calc_dims.py --w 32 --h 32 --scale 0.5 | cut -d' ' -f2`; \
+	$(PY) pc/compare.py --wa $$W2 --ha $$H2 --wb $$W2 --hb $$H2 \
+	  --a results/out_hw.raw \
+	  --b vectors/golden/grad_32_s05.raw
+
+.PHONY: verify_all
+
+verify_all:
+	$(PY) tests/run_all_tests.py
