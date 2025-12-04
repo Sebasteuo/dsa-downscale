@@ -72,6 +72,7 @@ module bilinear_top #(
 
     // STATUS se arma combinacionalmente a partir de core activo
     reg [31:0] status_reg;
+    reg [7:0] pix_inc;
 
     // ---------- Campos útiles de CTRL ----------
     wire ctrl_en        = ctrl_reg[0];   // EN
@@ -168,7 +169,6 @@ module bilinear_top #(
                 // píxeles generados este ciclo
                 // escalar: 1 si wr_valid_scalar
                 // SIMD: popcount(wr_valid_simd)
-                reg [7:0] pix_inc;
                 pix_inc = 8'd0;
                 if (ctrl_mode == 1'b0) begin
                     if (wr_valid_scalar)

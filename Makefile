@@ -71,3 +71,26 @@ unit_csv: coords_csv bilinear_csv
 
 all_ok: dirs gen_vectors golden_all tb_top compare_top meta_sw perf_summary report
 	@echo "listo todo"
+
+.PHONY: simd_run simd_check
+
+# corre la simulacion SIMD y genera results/out_hw_simd.raw
+simd_run:
+	@if command -v iverilog >/dev/null 2>&1; then \
+		iverilog -g2012 -o tb_top_simd_tb \
+		  tb/top/tb_top_simd.sv \
+		  tb/rtl/bilinear_top.sv \
+		  tb/rtl/bilinear_core_scalar.sv \
+		  tb/rtl/bilinear_core_simd.sv && \
+		vvp tb_top_simd_tb; \
+	else \
+		echo "no hay iverilog instalado, se omite simd_run"; \
+	fi
+
+# compara salida SIMD contra golden (32x32 con escala 0.5)
+simd_check:
+	@W2=`$(PY) scripts/calc_dims.py --w 32 --h 32 --scale 0.5 | cut -d' ' -f1`; \
+	H2=`$(PY) scripts/calc_dims.py --w 32 --h 32 --scale 0.5 | cut -d' ' -f2`; \
+	$(PY) pc/compare.py --wa $$W2 --ha $$H2 --wb $$W2 --hb $$H2 \
+	  --a results/out_hw_simd.raw \
+	  --b vectors/golden/grad_32_s05.raw
