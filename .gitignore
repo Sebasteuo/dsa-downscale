@@ -26,8 +26,13 @@ tb/JTAG/dsa/quartus/simulation
 tb/JTAG/dsa/quartus/db/
 tb/JTAG/dsa/quartus/dsa_jtag_sys/
 tb/JTAG/dsa/quartus/.qsys_edit/
+tb/JTAG/dsa/quartus/*.v
+tb/JTAG/dsa/quartus/*.tcl
+tb/JTAG/dsa/quartus/*.txt
 *.qsf
+*.qpf
 *.sopcinfo
+*.qsys
 # Archivos de respaldo del editor
 *.sv.bak
 *.bak
