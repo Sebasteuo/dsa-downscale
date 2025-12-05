@@ -1,12 +1,15 @@
-//  - Entrada y salida en BRAM interna (arrays de 32 bits).
-//  - Modo 0: core secuencial que copia in_mem -> out_mem.
-//  - Modo 1: downscale con factor Q8.8 (nearest-neighbor / Bresenham).
+// dsa_top_seq.sv
+// Top secuencial con core bilineal escalar:
+//  - Soporta hasta 64x64 píxeles (IMG_MAX_W/H).
+//  - Entrada y salida en BRAM interna de 8 bits (1 píxel por entrada).
+//  - Usa bilinear_core_scalar como único core.
+//  - PERF_CYC: ciclos mientras el core está ocupado.
+//  - PERF_PIX: número de píxeles escritos por el core (wr_valid).
 
 module dsa_top_seq #(
   parameter int ADDR_WIDTH = 16,
-  // Tamaño máximo soportado en esta etapa
-  parameter int IMG_MAX_W  = 64,
-  parameter int IMG_MAX_H  = 64
+  parameter int IMG_MAX_W  = 32,
+  parameter int IMG_MAX_H  = 32
 ) (
   input  logic                  clk,
   input  logic                  rst_n,
@@ -20,23 +23,25 @@ module dsa_top_seq #(
   output logic                  h_rvalid
 );
 
+  // ---------------------------------------------------------
   // Parámetros y memoria
-  localparam int MAX_PIXELS = IMG_MAX_W * IMG_MAX_H;         
-  localparam int MAX_WORDS  = (MAX_PIXELS + 3) >> 2;        
+  // ---------------------------------------------------------
+  localparam int MAX_PIXELS = IMG_MAX_W * IMG_MAX_H;            // 64x64 = 4096
+  localparam int MAX_WORDS  = (MAX_PIXELS + 3) >> 2;            // 4096/4 = 1024
 
-  (* ramstyle = "M10K", no_rw_check *)
-  logic [31:0] in_mem  [0:MAX_WORDS-1];
+  // Memoria de entrada/salida en píxeles de 8 bits
+  logic [7:0] in_pix_mem  [0:MAX_PIXELS-1];
+  logic [7:0] out_pix_mem [0:MAX_PIXELS-1];
 
-  (* ramstyle = "M10K", no_rw_check *)
-  logic [31:0] out_mem [0:MAX_WORDS-1];
-
+  // ---------------------------------------------------------
   // Registros de configuración / estado
+  // ---------------------------------------------------------
   localparam logic [15:0] REG_CTRL      = 16'h0000;
   localparam logic [15:0] REG_STATUS    = 16'h0001;
   localparam logic [15:0] REG_IMG_W     = 16'h0002;
   localparam logic [15:0] REG_IMG_H     = 16'h0003;
   localparam logic [15:0] REG_SCALE     = 16'h0004;
-  localparam logic [15:0] REG_MODE      = 16'h0005;
+  localparam logic [15:0] REG_MODE      = 16'h0005;   // guardado pero no usado
   localparam logic [15:0] REG_PERF_CYC  = 16'h0006;
   localparam logic [15:0] REG_PERF_PIX  = 16'h0007;
 
@@ -48,457 +53,286 @@ module dsa_top_seq #(
   // Config
   logic [15:0] img_w;
   logic [15:0] img_h;
-  logic [15:0] scale_q8_8;  
-  logic [7:0]  mode;    
+  logic [15:0] scale_q8_8;   // scale en Q8.8 (lo que viene de SW)
+  logic [7:0]  mode;         // guardado pero no usado
 
-  // punteros de BRAM
-  logic [15:0] in_ptr;
-  logic [15:0] out_ptr;
+  // Dimensiones de salida calculadas en HW
+  logic [15:0] out_w;
+  logic [15:0] out_h;
 
-  // Status
-  logic busy;
-  logic done;
+  // Escala inversa para el core bilineal (inv_scale_q ≈ 1/scale)
+  logic [15:0] inv_scale_q;
+
+  // punteros de BRAM (en palabras de 32 bits para interfaz host)
+  logic [15:0] in_ptr;       // índice de palabra para escritura de entrada
+  logic [15:0] out_ptr;      // índice de palabra para lectura de salida
 
   // Performance
   logic [31:0] perf_cyc;
   logic [31:0] perf_pix;
-  
-  // Dimensiones de salida calculadas en HW (modo downscale)
-  logic [15:0] out_w;
-  logic [15:0] out_h;
 
-  // Coordenadas actuales de salida (x_out, y_out)
-  logic [15:0] ds_out_x;
-  logic [15:0] ds_out_y;
+  // Señales del core bilineal escalar
+  logic        core_busy;
+  logic        core_done;
+  logic        core_wr_valid;
+  logic [31:0] core_wr_addr;
+  logic [7:0]  core_wr_data;
 
-  // Coordenadas actuales de entrada (x_in, y_in) mapeadas por Bresenham
-  logic [15:0] ds_in_x;
-  logic [15:0] ds_in_y;
+  logic [31:0] core_rd_addr0, core_rd_addr1, core_rd_addr2, core_rd_addr3;
+  logic [7:0]  core_rd_data0, core_rd_data1, core_rd_data2, core_rd_data3;
 
-  // Errores acumulados de Bresenham
-  logic [31:0] ds_err_x;
-  logic [31:0] ds_err_y;
+  // Pulso de start hacia el core
+  logic        start_pulse;
 
-  // Control de empaquetado de salida
-  logic [31:0] ds_dst_word_idx;
-  logic [1:0]  ds_dst_byte_pos;
-  logic [31:0] ds_dst_word_data;
+  // STATUS
+  wire busy = core_busy;
+  wire done = core_done;
 
-  // FSM
-  typedef enum logic [1:0] {
-    S_IDLE,
-    S_RUN,
-    S_DONE
-  } core_state_t;
+  // Auxiliares
+  logic [31:0] tmp_word;
+  integer      i;
 
-  core_state_t state;
+  // Índices para lectura del core
+  integer rd_idx0, rd_idx1, rd_idx2, rd_idx3;
 
-  logic [15:0] word_idx;
-  logic [15:0] word_count;
+  // Índices base separados para escritura/lectura
+  integer base_pix_wr;  // se usa sólo en always_ff (escritura)
+  integer base_pix_rd;  // se usa sólo en always_comb (lectura/empacado)
 
-  // Pulso de start
-  logic start_req;
+  // Condición de START detectada en la escritura al registro CTRL
+  wire start_cond = (h_wr_en && (h_addr == REG_CTRL) && h_wdata[0]);
 
-  // Escrituras + FSM
+  // ---------------------------------------------------------
+  // Instancia del core bilineal escalar
+  // ---------------------------------------------------------
+  bilinear_core_scalar #(
+    .W_MAX(IMG_MAX_W),
+    .H_MAX(IMG_MAX_H)
+  ) core_scalar_u (
+    .clk        (clk),
+    .rst_n      (rst_n),
+
+    .start      (start_pulse),
+    .in_w       (img_w),
+    .in_h       (img_h),
+    .out_w      (out_w),
+    .out_h      (out_h),
+    .inv_scale_q(inv_scale_q),
+
+    // Stepping desactivado
+    .step_mode  (1'b0),
+    .step       (1'b0),
+    .step_ack   (),
+
+    .busy       (core_busy),
+    .done       (core_done),
+
+    .rd_addr0   (core_rd_addr0),
+    .rd_addr1   (core_rd_addr1),
+    .rd_addr2   (core_rd_addr2),
+    .rd_addr3   (core_rd_addr3),
+    .rd_data0   (core_rd_data0),
+    .rd_data1   (core_rd_data1),
+    .rd_data2   (core_rd_data2),
+    .rd_data3   (core_rd_data3),
+
+    .wr_valid   (core_wr_valid),
+    .wr_addr    (core_wr_addr),
+    .wr_data    (core_wr_data)
+  );
+
+  // start_pulse dura 1 ciclo cuando se escribe CTRL con bit0=1
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      img_w      			<= 16'd0;
-      img_h      			<= 16'd0;
-      scale_q8_8 			<= 16'd0;
-      mode       			<= 8'd0;
-
-      in_ptr     			<= 16'd0;
-      out_ptr    			<= 16'd0;
-
-      busy       			<= 1'b0;
-      done       			<= 1'b0;
-
-      perf_cyc   			<= 32'd0;
-      perf_pix   			<= 32'd0;
-
-      state      			<= S_IDLE;
-      word_idx   			<= 16'd0;
-      word_count 			<= 16'd0;
-		
-      out_w					<= 16'd0;
-      out_h					<= 16'd0;
-		
-      ds_out_x				<= 16'd0;
-      ds_out_y				<= 16'd0;
-		
-      ds_in_x				<= 16'd0;
-      ds_in_y				<= 16'd0;
-		
-      ds_err_x				<= 32'd0;
-      ds_err_y				<= 32'd0;
-		
-      ds_dst_word_idx	<= 32'd0;
-      ds_dst_byte_pos	<= 2'd0;
-      ds_dst_word_data	<= 32'd0;
-
-      start_req  			<= 1'b0;
+      start_pulse <= 1'b0;
     end else begin
-      start_req <= 1'b0;
+      start_pulse <= start_cond;
+    end
+  end
 
-      // Escrituras host
+  // ---------------------------------------------------------
+  // Lectura de píxeles para el core desde in_pix_mem
+  // ---------------------------------------------------------
+  always_comb begin
+    core_rd_data0 = 8'd0;
+    core_rd_data1 = 8'd0;
+    core_rd_data2 = 8'd0;
+    core_rd_data3 = 8'd0;
+
+    rd_idx0 = core_rd_addr0;
+    rd_idx1 = core_rd_addr1;
+    rd_idx2 = core_rd_addr2;
+    rd_idx3 = core_rd_addr3;
+
+    if (rd_idx0 >= 0 && rd_idx0 < MAX_PIXELS)
+      core_rd_data0 = in_pix_mem[rd_idx0];
+
+    if (rd_idx1 >= 0 && rd_idx1 < MAX_PIXELS)
+      core_rd_data1 = in_pix_mem[rd_idx1];
+
+    if (rd_idx2 >= 0 && rd_idx2 < MAX_PIXELS)
+      core_rd_data2 = in_pix_mem[rd_idx2];
+
+    if (rd_idx3 >= 0 && rd_idx3 < MAX_PIXELS)
+      core_rd_data3 = in_pix_mem[rd_idx3];
+  end
+
+  // ---------------------------------------------------------
+  // Escrituras, lecturas, contadores y memoria
+  // ---------------------------------------------------------
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      img_w      <= 16'd0;
+      img_h      <= 16'd0;
+      scale_q8_8 <= 16'd0;
+      mode       <= 8'd0;
+
+      out_w      <= 16'd0;
+      out_h      <= 16'd0;
+      inv_scale_q<= 16'h0100;  // por defecto 1.0
+
+      in_ptr     <= 16'd0;
+      out_ptr    <= 16'd0;
+
+      perf_cyc   <= 32'd0;
+      perf_pix   <= 32'd0;
+
+      base_pix_wr <= 0;
+
+      // Inicializar memorias a 0 (útil en simulación)
+      for (i = 0; i < MAX_PIXELS; i = i + 1) begin
+        in_pix_mem[i]  <= 8'd0;
+        out_pix_mem[i] <= 8'd0;
+      end
+    end else begin
+      // ==============================
+      // Escrituras desde el host
+      // ==============================
       if (h_wr_en) begin
         unique case (h_addr)
-          REG_IMG_W:    img_w      <= h_wdata[15:0];
-          REG_IMG_H:    img_h      <= h_wdata[15:0];
-          REG_SCALE:    scale_q8_8 <= h_wdata[15:0];
-          REG_MODE:     mode       <= h_wdata[7:0];
+          REG_IMG_W:   img_w      <= h_wdata[15:0];
+          REG_IMG_H:   img_h      <= h_wdata[15:0];
+          REG_SCALE:   scale_q8_8 <= h_wdata[15:0];
+          REG_MODE:    mode       <= h_wdata[7:0];
 
-          REG_IN_ADDR:  in_ptr     <= h_wdata[15:0];
+          // Puntero de entrada en palabras de 32 bits
+          REG_IN_ADDR: in_ptr     <= h_wdata[15:0];
 
+          // Escritura de datos de entrada (4 píxeles por palabra)
           REG_IN_DATA: begin
             if (in_ptr < MAX_WORDS[15:0]) begin
-              in_mem[in_ptr] <= h_wdata;
-              in_ptr         <= in_ptr + 16'd1;
+              tmp_word    = h_wdata;
+              base_pix_wr = in_ptr * 4;
+
+              // b0 = píxel 0 (LSB)
+              if (base_pix_wr >= 0 && base_pix_wr < MAX_PIXELS)
+                in_pix_mem[base_pix_wr] <= tmp_word[7:0];
+
+              // b1 = píxel 1
+              if ((base_pix_wr + 1) >= 0 && (base_pix_wr + 1) < MAX_PIXELS)
+                in_pix_mem[base_pix_wr + 1] <= tmp_word[15:8];
+
+              // b2 = píxel 2
+              if ((base_pix_wr + 2) >= 0 && (base_pix_wr + 2) < MAX_PIXELS)
+                in_pix_mem[base_pix_wr + 2] <= tmp_word[23:16];
+
+              // b3 = píxel 3
+              if ((base_pix_wr + 3) >= 0 && (base_pix_wr + 3) < MAX_PIXELS)
+                in_pix_mem[base_pix_wr + 3] <= tmp_word[31:24];
+
+              in_ptr <= in_ptr + 16'd1;
             end
           end
 
-          REG_OUT_ADDR: out_ptr    <= h_wdata[15:0];
+          // Puntero de salida en palabras de 32 bits
+          REG_OUT_ADDR: out_ptr   <= h_wdata[15:0];
 
+          // REG_CTRL: sólo usamos bit0 como START, manejado por start_cond/start_pulse
           REG_CTRL: begin
-            if (h_wdata[0])
-              start_req <= 1'b1;
+            // Nada que guardar; el efecto es start_cond/start_pulse
           end
 
           default: ;
         endcase
       end
 
-      // Lectura de OUT_DATA -> autoincremento
+      // ==============================
+      // Autoincremento de OUT_ADDR al leer OUT_DATA
+      // ==============================
       if (h_rd_en && (h_addr == REG_OUT_DATA)) begin
         if (out_ptr < MAX_WORDS[15:0]) begin
           out_ptr <= out_ptr + 16'd1;
         end
       end
 
-      // FSM
-      unique case (state)
-        // =========================
-        // S_IDLE
-        // =========================
-        S_IDLE: begin
-          busy <= 1'b0;
-          done <= 1'b0;
+      // ==============================
+      // Lógica de inicio de operación
+      // ==============================
+      if (start_cond) begin
+        // Dimensiones de salida igual que compute_out_dims_hw_like()
+        logic [31:0] ow_full;
+        logic [31:0] oh_full;
+        logic [15:0] ow;
+        logic [15:0] oh;
 
-          if (start_req) begin
-            if (mode[0] == 1'b0) begin
-              // -------------------------
-              // Modo 0: COPIA
-              // -------------------------
-              logic [31:0] total_pix;
-              total_pix = img_w * img_h;
-              if (total_pix > MAX_PIXELS)
-                total_pix = MAX_PIXELS;
+        ow_full = img_w * scale_q8_8;
+        oh_full = img_h * scale_q8_8;
 
-              perf_pix   <= total_pix;
-              perf_cyc   <= 32'd0;
+        ow = ow_full[23:8]; // >> 8
+        oh = oh_full[23:8];
 
-              word_count <= (total_pix + 3) >> 2;
-              word_idx   <= 16'd0;
+        if (ow == 16'd0) ow = 16'd1;
+        if (oh == 16'd0) oh = 16'd1;
 
-              busy       <= 1'b1;
-              done       <= 1'b0;
-              state      <= S_RUN;
+        if (ow > IMG_MAX_W[15:0]) ow = IMG_MAX_W[15:0];
+        if (oh > IMG_MAX_H[15:0]) oh = IMG_MAX_H[15:0];
 
-            end else begin
-              // -------------------------
-              // Modo 1: DOWNSCALE
-              // -------------------------
-              logic [31:0] ow_full, oh_full;
-              logic [15:0] ow, oh;
+        if (ow > img_w) ow = img_w;
+        if (oh > img_h) oh = img_h;
 
-              // out_w = floor(img_w * scale / 256)
-              ow_full = img_w * scale_q8_8;
-              oh_full = img_h * scale_q8_8;
+        out_w <= ow;
+        out_h <= oh;
 
-              ow = ow_full[23:8];  // >> 8
-              oh = oh_full[23:8];
-
-              // Evitar cero
-              if (ow == 16'd0) ow = 16'd1;
-              if (oh == 16'd0) oh = 16'd1;
-
-              // Clamp contra límites y contra img_w/img_h
-              if (ow > IMG_MAX_W[15:0]) ow = IMG_MAX_W[15:0];
-              if (oh > IMG_MAX_H[15:0]) oh = IMG_MAX_H[15:0];
-              if (ow > img_w)           ow = img_w;
-              if (oh > img_h)           oh = img_h;
-
-              out_w <= ow;
-              out_h <= oh;
-
-              perf_pix <= ow * oh;
-              perf_cyc <= 32'd0;
-
-              // No usamos word_count en modo 1, pero lo dejamos coherente
-              word_count <= ((ow * oh) + 3) >> 2;
-
-              // Inicializar “loops” de downscale
-              ds_out_x <= 16'd0;
-              ds_out_y <= 16'd0;
-              ds_in_x  <= 16'd0;
-              ds_in_y  <= 16'd0;
-
-              ds_err_x <= 32'd0;
-              ds_err_y <= 32'd0;
-
-              ds_dst_word_idx  <= 32'd0;
-              ds_dst_byte_pos  <= 2'd0;
-              ds_dst_word_data <= 32'd0;
-
-              busy  <= 1'b1;
-              done  <= 1'b0;
-              state <= S_RUN;
-            end
-          end
+        // inv_scale_q ≈ (1/scale) en Q8.8 => 65536 / scale_q8_8
+        if (scale_q8_8 == 16'd0) begin
+          inv_scale_q <= 16'h0100; // por defecto 1.0 para evitar /0
+        end else begin
+          inv_scale_q <= (32'd65536 / scale_q8_8);
         end
 
-        // =========================
-        // S_RUN
-        // =========================
-        S_RUN: begin
+        // Reset de contadores
+        perf_cyc <= 32'd0;
+        perf_pix <= 32'd0;
+      end else begin
+        // ==============================
+        // Actualización de contadores
+        // ==============================
+        if (core_busy && !core_done) begin
           perf_cyc <= perf_cyc + 32'd1;
-
-          if (mode[0] == 1'b0) begin
-            // ===== MODO 0: COPIA =====
-            if (word_idx < word_count && word_idx < MAX_WORDS[15:0]) begin
-              out_mem[word_idx] <= in_mem[word_idx];
-              word_idx          <= word_idx + 16'd1;
-            end else begin
-              busy  <= 1'b0;
-              done  <= 1'b1;
-              state <= S_DONE;
-            end
-
-          end else begin : ds_run
-            // ===== MODO 1: DOWNSCALE =====
-
-            // Declaraciones locales
-            logic [31:0] src_index;
-            logic [31:0] src_word_idx;
-            logic [1:0]  src_byte_idx;
-            logic [31:0] src_word;
-            logic [7:0]  src_pix;
-            logic [31:0] new_word;
-
-            logic        last_pixel;
-            logic        end_row;
-            logic [15:0] next_out_x, next_out_y;
-            logic [15:0] next_in_x,  next_in_y;
-            logic [31:0] next_err_x, next_err_y;
-
-            // Valores por defecto
-            next_out_x = ds_out_x;
-            next_out_y = ds_out_y;
-            next_in_x  = ds_in_x;
-            next_in_y  = ds_in_y;
-            next_err_x = ds_err_x;
-            next_err_y = ds_err_y;
-
-            // Si ya nos pasamos en Y, terminar
-            if (ds_out_y >= out_h) begin
-              busy  <= 1'b0;
-              done  <= 1'b1;
-              state <= S_DONE;
-            end else begin
-              // 1) Calcular índice de origen
-              src_index    = ds_in_y;
-              src_index    = src_index * img_w + ds_in_x;
-              src_word_idx = src_index >> 2;
-              src_byte_idx = src_index[1:0];
-
-              src_word     = in_mem[src_word_idx];
-              case (src_byte_idx)
-                2'd0: src_pix = src_word[7:0];
-                2'd1: src_pix = src_word[15:8];
-                2'd2: src_pix = src_word[23:16];
-                2'd3: src_pix = src_word[31:24];
-              endcase
-
-              // 2) Insertar píxel en la palabra de salida en construcción
-              new_word = ds_dst_word_data;
-              case (ds_dst_byte_pos)
-                2'd0: new_word[7:0]   = src_pix;
-                2'd1: new_word[15:8]  = src_pix;
-                2'd2: new_word[23:16] = src_pix;
-                2'd3: new_word[31:24] = src_pix;
-              endcase
-              ds_dst_word_data <= new_word;
-
-              // ¿Último píxel global?
-              last_pixel = (ds_out_y == out_h - 16'd1) &&
-                           (ds_out_x == out_w - 16'd1);
-
-              // ¿Último de la fila?
-              end_row    = (ds_out_x == out_w - 16'd1);
-
-              // 3) Escribir palabra cuando se llena o si es el último píxel
-              if (ds_dst_byte_pos == 2'd3 || last_pixel) begin
-                out_mem[ds_dst_word_idx[15:0]] <= new_word;
-                ds_dst_word_idx <= ds_dst_word_idx + 32'd1;
-              end
-
-              // 4) Actualizar byte_pos
-              if (ds_dst_byte_pos == 2'd3)
-                ds_dst_byte_pos <= 2'd0;
-              else
-                ds_dst_byte_pos <= ds_dst_byte_pos + 2'd1;
-
-              // 5) Si es el último píxel, terminar
-              if (last_pixel) begin
-                busy  <= 1'b0;
-                done  <= 1'b1;
-                state <= S_DONE;
-              end else begin
-                // 6) Calcular coordenadas siguientes (Bresenham)
-                if (end_row) begin
-                  logic [31:0] tmp_err_y;
-                  logic [15:0] tmp_in_y;
-                  // ---- Fin de fila de salida ----
-                  next_out_x = 16'd0;
-                  next_out_y = ds_out_y + 16'd1;
-
-                  // Reiniciar mapeo horizontal
-                  next_in_x  = 16'd0;
-                  next_err_x = 32'd0;
-
-                  // Avance vertical
-                  tmp_err_y = ds_err_y + img_h;
-                  tmp_in_y  = ds_in_y;
-
-                  if (tmp_err_y >= out_h) begin
-                    tmp_err_y -= out_h;
-                    tmp_in_y  += 16'd1;
-                    if (tmp_err_y >= out_h) begin
-                      tmp_err_y -= out_h;
-                      tmp_in_y  += 16'd1;
-                    end
-                  end
-
-                  next_err_y = tmp_err_y;
-                  next_in_y  = tmp_in_y;
-                end else begin
-                  logic [31:0] tmp_err_x;
-                  logic [15:0] tmp_in_x;
-                  // ---- Misma fila de salida ----
-                  next_out_x = ds_out_x + 16'd1;
-                  next_out_y = ds_out_y;
-
-                  // Avance horizontal
-                  tmp_err_x = ds_err_x + img_w;
-                  tmp_in_x  = ds_in_x;
-
-                  if (tmp_err_x >= out_w) begin
-                    tmp_err_x -= out_w;
-                    tmp_in_x  += 16'd1;
-                    if (tmp_err_x >= out_w) begin
-                      tmp_err_x -= out_w;
-                      tmp_in_x  += 16'd1;
-                    end
-                  end
-
-                  next_err_x = tmp_err_x;
-                  next_in_x  = tmp_in_x;
-                end
-
-                // 7) Commit de coordenadas siguientes
-                ds_out_x <= next_out_x;
-                ds_out_y <= next_out_y;
-                ds_in_x  <= next_in_x;
-                ds_in_y  <= next_in_y;
-                ds_err_x <= next_err_x;
-                ds_err_y <= next_err_y;
-              end
-            end
-          end
         end
 
-        // =========================
-        // S_DONE
-        // =========================
-        S_DONE: begin
-          busy <= 1'b0;
-          done <= 1'b1;
-
-          if (start_req) begin
-            // Exactamente el mismo código de S_IDLE con start_req
-            if (mode[0] == 1'b0) begin
-              // ---- MODO 0: COPIA ----
-              logic [31:0] total_pix;
-              total_pix = img_w * img_h;
-              if (total_pix > MAX_PIXELS)
-                total_pix = MAX_PIXELS;
-
-              perf_pix   <= total_pix;
-              perf_cyc   <= 32'd0;
-
-              word_count <= (total_pix + 3) >> 2;
-              word_idx   <= 16'd0;
-
-              busy       <= 1'b1;
-              done       <= 1'b0;
-              state      <= S_RUN;
-
-            end else begin
-              // ---- MODO 1: DOWNSCALE ----
-              logic [31:0] ow_full, oh_full;
-              logic [15:0] ow, oh;
-
-              ow_full = img_w * scale_q8_8;
-              oh_full = img_h * scale_q8_8;
-
-              ow = ow_full[23:8];
-              oh = oh_full[23:8];
-
-              if (ow == 16'd0) ow = 16'd1;
-              if (oh == 16'd0) oh = 16'd1;
-
-              if (ow > IMG_MAX_W[15:0]) ow = IMG_MAX_W[15:0];
-              if (oh > IMG_MAX_H[15:0]) oh = IMG_MAX_H[15:0];
-              if (ow > img_w)           ow = img_w;
-              if (oh > img_h)           oh = img_h;
-
-              out_w <= ow;
-              out_h <= oh;
-
-              perf_pix <= ow * oh;
-              perf_cyc <= 32'd0;
-              word_count <= ((ow * oh) + 3) >> 2;
-
-              ds_out_x <= 16'd0;
-              ds_out_y <= 16'd0;
-              ds_in_x  <= 16'd0;
-              ds_in_y  <= 16'd0;
-
-              ds_err_x <= 32'd0;
-              ds_err_y <= 32'd0;
-
-              ds_dst_word_idx  <= 32'd0;
-              ds_dst_byte_pos  <= 2'd0;
-              ds_dst_word_data <= 32'd0;
-
-              busy  <= 1'b1;
-              done  <= 1'b0;
-              state <= S_RUN;
-            end
-          end
+        if (core_wr_valid) begin
+          perf_pix <= perf_pix + 32'd1;
         end
+      end
 
-        default: state <= S_IDLE;
-      endcase
-      
+      // ==============================
+      // Escritura en memoria de salida desde el core
+      // ==============================
+      if (core_wr_valid) begin
+        if (core_wr_addr < MAX_PIXELS) begin
+          out_pix_mem[core_wr_addr] <= core_wr_data;
+        end
+      end
     end
   end
 
   // ---------------------------------------------------------
-  // Lecturas
+  // Lecturas (CSRs + empaquetado de salida)
   // ---------------------------------------------------------
   always_comb begin
-    h_rdata = 32'd0;
+    h_rdata     = 32'd0;
+    base_pix_rd = out_ptr * 4;
 
     unique case (h_addr)
       REG_STATUS:    h_rdata = {30'd0, done, busy};
@@ -513,7 +347,28 @@ module dsa_top_seq #(
       REG_IN_ADDR:   h_rdata = {16'd0, in_ptr};
       REG_OUT_ADDR:  h_rdata = {16'd0, out_ptr};
 
-      REG_OUT_DATA:  h_rdata = out_mem[out_ptr];
+      REG_OUT_DATA: begin
+        logic [7:0] b0, b1, b2, b3;
+
+        b0 = 8'd0;
+        b1 = 8'd0;
+        b2 = 8'd0;
+        b3 = 8'd0;
+
+        if (base_pix_rd >= 0 && base_pix_rd < MAX_PIXELS)
+          b0 = out_pix_mem[base_pix_rd];
+
+        if ((base_pix_rd + 1) >= 0 && (base_pix_rd + 1) < MAX_PIXELS)
+          b1 = out_pix_mem[base_pix_rd + 1];
+
+        if ((base_pix_rd + 2) >= 0 && (base_pix_rd + 2) < MAX_PIXELS)
+          b2 = out_pix_mem[base_pix_rd + 2];
+
+        if ((base_pix_rd + 3) >= 0 && (base_pix_rd + 3) < MAX_PIXELS)
+          b3 = out_pix_mem[base_pix_rd + 3];
+
+        h_rdata = {b3, b2, b1, b0};
+      end
 
       default: ;
     endcase

@@ -7,8 +7,8 @@
 
 module bilinear_core_simd #(
     parameter integer N     = 4,
-    parameter integer W_MAX = 1024,
-    parameter integer H_MAX = 1024
+    parameter integer W_MAX = 64,
+    parameter integer H_MAX = 64
 ) (
     input  wire             clk,
     input  wire             rst_n,

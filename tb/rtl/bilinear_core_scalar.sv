@@ -5,8 +5,8 @@
 `timescale 1ns/1ps
 
 module bilinear_core_scalar #(
-    parameter W_MAX = 1024,
-    parameter H_MAX = 1024
+    parameter W_MAX = 64,
+    parameter H_MAX = 64
 ) (
     input        clk,
     input        rst_n,
