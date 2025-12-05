@@ -23,6 +23,11 @@ tb/JTAG/dsa/pc/dsa_jtag_driver
 tb/JTAG/dsa/quartus/incremental_db
 tb/JTAG/dsa/quartus/output_files
 tb/JTAG/dsa/quartus/simulation
+tb/JTAG/dsa/quartus/db/
+tb/JTAG/dsa/quartus/dsa_jtag_sys/
+tb/JTAG/dsa/quartus/.qsys_edit/
+*.qsf
+*.sopcinfo
 # Archivos de respaldo del editor
 *.sv.bak
 *.bak
