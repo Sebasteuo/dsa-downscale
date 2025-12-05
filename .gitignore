@@ -9,6 +9,8 @@ vectors/patterns/*.raw
 *.raw
 *.pgm
 # binarios/temporales sim
+downscale_ref_cpp
+tb_top_sv_simd
 *.vvp
 tb_top_sv
 tb_coords
