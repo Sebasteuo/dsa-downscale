@@ -1,5 +1,3 @@
-// dsa_jtag_driver.cpp
-//
 // Wrapper en C++ para:
 //  - ejecutar el downscale de referencia en CPU (modelo bilineal igual al core),
 //  - llamar a system-console + Tcl para ejecutar el core en FPGA,
@@ -32,7 +30,7 @@ static inline double my_floor(double x) { return std::floor(x); }
 static inline double my_round(double x) { return std::floor(x + 0.5); }
 // Ruta al system-console (ya probada por Randall en su máquina)
 static const std::string SC_BIN =
-    "/home/hack/altera_lite/25.1std/quartus/sopc_builder/bin/system-console";
+    "/home/hack/intelFPGA_lite/20.1/quartus/sopc_builder/bin/system-console";
 
 // Directorio del proyecto Quartus (donde está el .qpf)
 static const std::string PROJ_DIR =
@@ -40,19 +38,22 @@ static const std::string PROJ_DIR =
 
 // Ruta al script Tcl (desde donde se ejecuta este binario)
 static const std::string TCL_SCRIPT =
-    "../jtag/dsa_jtag_downscale_raw.tcl";
+    "../jtag/dsa_jtag_test_16x16_raw.tcl";
 
-// Límite actual del core en HW (por ahora 64x64)
-static const int HW_IMG_MAX_W = 64;
-static const int HW_IMG_MAX_H = 64;
+// Límite actual del core en HW
+static const int HW_IMG_MAX_W = 32;
+static const int HW_IMG_MAX_H = 32;
 
 // -----------------------------------------------------------------------------
 // Utilidades simples
 // -----------------------------------------------------------------------------
 
-static uint8_t clamp_u8(int x) {
-    if (x < 0)   return 0;
-    if (x > 255) return 255;
+static uint8_t clamp_u8(int x)
+{
+    if (x < 0)
+        return 0;
+    if (x > 255)
+        return 255;
     return static_cast<uint8_t>(x);
 }
 
@@ -135,7 +136,7 @@ static void compute_out_dims_hw_like(
 }
 
 // -----------------------------------------------------------------------------
-// Modelo de referencia bilineal en C++ (igual al Python/ref_cpp)
+// Modelo de referencia bilineal en C++
 // -----------------------------------------------------------------------------
 
 std::vector<uint8_t> downscale_ref_bilinear(
@@ -162,30 +163,42 @@ std::vector<uint8_t> downscale_ref_bilinear(
 
     std::vector<uint8_t> dst(out_w * out_h, 0);
 
-    auto at = [&](int x, int y) -> uint8_t {
-        if (x < 0) x = 0;
-        if (x >= img_w) x = img_w - 1;
-        if (y < 0) y = 0;
-        if (y >= img_h) y = img_h - 1;
+    auto at = [&](int x, int y) -> uint8_t
+    {
+        if (x < 0)
+            x = 0;
+        if (x >= img_w)
+            x = img_w - 1;
+        if (y < 0)
+            y = 0;
+        if (y >= img_h)
+            y = img_h - 1;
         int idx = y * img_w + x;
-        if (idx < 0 || idx >= total_pix) return 0;
+        if (idx < 0 || idx >= total_pix)
+            return 0;
         return src[idx];
     };
 
-    for (int yo = 0; yo < out_h; ++yo) {
+    for (int yo = 0; yo < out_h; ++yo)
+    {
         double ys = (static_cast<double>(yo) + 0.5) / scale - 0.5;
         int y0 = static_cast<int>(my_floor(ys));
-        if (y0 < 0) y0 = 0;
-        if (y0 > img_h - 1) y0 = img_h - 1;
+        if (y0 < 0)
+            y0 = 0;
+        if (y0 > img_h - 1)
+            y0 = img_h - 1;
         int y1 = (y0 + 1 < img_h) ? y0 + 1 : y0;
         double ty = ys - y0;
         int ty_q = std::min(255, static_cast<int>(my_round(ty * 256.0))); // Q8.8
 
-        for (int xo = 0; xo < out_w; ++xo) {
+        for (int xo = 0; xo < out_w; ++xo)
+        {
             double xs = (static_cast<double>(xo) + 0.5) / scale - 0.5;
             int x0 = static_cast<int>(my_floor(xs));
-            if (x0 < 0) x0 = 0;
-            if (x0 > img_w - 1) x0 = img_w - 1;
+            if (x0 < 0)
+                x0 = 0;
+            if (x0 > img_w - 1)
+                x0 = img_w - 1;
             int x1 = (x0 + 1 < img_w) ? x0 + 1 : x0;
             double tx = xs - x0;
             int tx_q = std::min(255, static_cast<int>(my_round(tx * 256.0))); // Q8.8
@@ -256,7 +269,8 @@ int main(int argc, char **argv)
 {
     if (argc != 6)
     {
-        std::cerr << "Uso:\n  " << argv[0]
+        std::cerr << "Uso:\n"
+                  << "  " << argv[0]
                   << " <img_w> <img_h> <scale_hex> <in_raw> <out_hw_raw>\n\n";
         return 1;
     }
@@ -276,10 +290,13 @@ int main(int argc, char **argv)
     std::cout << "  img_h      = " << img_h << "\n";
 
     uint32_t scale_q8_8 = 0;
-    try {
+    try
+    {
         scale_q8_8 = static_cast<uint32_t>(
             std::stoul(scale_hex, nullptr, 16));
-    } catch (const std::exception &e) {
+    }
+    catch (const std::exception &e)
+    {
         std::cerr << "ERROR: no se pudo parsear scale_hex=" << scale_hex
                   << " (" << e.what() << ")\n";
         return 1;
@@ -297,21 +314,23 @@ int main(int argc, char **argv)
     // 2) Ejecutar referencia bilineal en CPU
     int ref_w = 0, ref_h = 0;
     std::vector<uint8_t> ref_out;
-    try {
+    try
+    {
         ref_out = downscale_ref_bilinear(
             img_w, img_h, scale_q8_8, src,
             ref_w, ref_h);
-    } catch (const std::exception &e) {
+    }
+    catch (const std::exception &e)
+    {
         std::cerr << "ERROR en referencia bilineal: " << e.what() << "\n";
         return 1;
     }
 
-    // Guardar referencia opcionalmente si se quiere inspeccionar
     save_raw("ref_out.raw", ref_out);
     std::cout << "Ref: salida " << ref_w << "x" << ref_h
               << " escrita en ref_out.raw\n";
 
-    // 3) Ejecutar el HW via system-console + Tcl
+    // 3) Ejecutar el HW via system-console + Tcl genérico
     if (!run_system_console(img_w, img_h, scale_hex, in_raw, out_hw))
     {
         std::cerr << "ERROR: fallo al invocar system-console.\n";
@@ -335,7 +354,7 @@ int main(int argc, char **argv)
     for (int i = 0; i < total; ++i)
     {
         uint8_t ref = ref_out[i];
-        uint8_t hw  = hw_out[i];
+        uint8_t hw = hw_out[i];
         if (ref != hw)
         {
             if (mismatches < 20)
@@ -345,7 +364,7 @@ int main(int argc, char **argv)
                 std::cout << "Mismatch en pixel " << i
                           << " (x=" << x << ", y=" << y << "): "
                           << "REF=0x" << std::hex << std::setw(2) << std::setfill('0') << (int)ref
-                          << " HW=0x"  << std::setw(2) << (int)hw
+                          << " HW=0x" << std::setw(2) << (int)hw
                           << std::dec << "\n";
             }
             mismatches++;

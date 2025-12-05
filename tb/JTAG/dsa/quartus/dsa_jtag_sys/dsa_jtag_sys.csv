@@ -1,0 +1,20 @@
+# system info dsa_jtag_sys on 2025.12.04.23:06:08
+system_info:
+name,value
+DEVICE,5CSEMA5F31C6
+DEVICE_FAMILY,Cyclone V
+GENERATION_ID,1764911168
+#
+#
+# Files generated for dsa_jtag_sys on 2025.12.04.23:06:08
+files:
+filepath,kind,attributes,module,is_top
+simulation/dsa_jtag_sys.v,VERILOG,,dsa_jtag_sys,true
+#
+# Map from instance-path to kind of module
+instances:
+instancePath,module
+dsa_jtag_sys.dsa_avalon_slave_0,dsa_jtag_sys_dsa_avalon_slave_0
+dsa_jtag_sys.master_0,dsa_jtag_sys_master_0
+dsa_jtag_sys.mm_interconnect_0,dsa_jtag_sys_mm_interconnect_0
+dsa_jtag_sys.rst_controller,altera_reset_controller
