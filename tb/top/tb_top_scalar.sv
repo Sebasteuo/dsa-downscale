@@ -13,7 +13,7 @@ module tb_top_scalar;
   localparam OUT_H = 16;
 
   // 0 = corre normal, 1 = stepping
-  localparam USE_STEPPING = 1'b1;
+  localparam USE_STEPPING = 1'b0;
 
   // BRAM
   reg [7:0] img_in  [0:IN_W*IN_H-1];   // 0..1023

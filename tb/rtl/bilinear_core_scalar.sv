@@ -1,6 +1,7 @@
 // tb/rtl/bilinear_core_scalar.sv
 // Núcleo secuencial: procesa un píxel de salida cada 2 ciclos
-// Ahora con opción de stepping (STEP / STEP_ACK).
+// Igual que el original en comportamiento (Q8.8), pero sin 'integer'
+// genéricos: se usan anchos fijos (logic signed [31:0]).
 
 `timescale 1ns/1ps
 
@@ -45,8 +46,8 @@ module bilinear_core_scalar #(
 );
 
     // Q8.8
-    localparam FRAC_BITS = 8;
-    localparam ONE_Q     = 1 << FRAC_BITS; // 256
+    localparam int FRAC_BITS = 8;
+    localparam int ONE_Q     = 1 << FRAC_BITS; // 256
 
     // Índices de píxel de salida (xo, yo)
     reg [15:0] cur_x, cur_y;
@@ -58,25 +59,25 @@ module bilinear_core_scalar #(
 
     reg [1:0] state;
 
-    // Registros para guardar coordenadas de un píxel mientras llega la BRAM
-    integer y0_i, y1_i, x0_i, x1_i;
-    integer tx_q_i, ty_q_i;
+    // ----- Variables internas con ancho fijo (equivalentes a integer) -----
+    // Coordenadas y fracciones
+    logic signed [31:0] y0_i, y1_i, x0_i, x1_i;
+    logic signed [31:0] tx_q_i, ty_q_i;
+    logic signed [31:0] yo_int, xo_int;
+    logic signed [31:0] yo_q, xo_q;
+    logic signed [31:0] temp_q_y, temp_q_x;
+    logic signed [31:0] ys_q, xs_q;
+    logic signed [31:0] y_int, x_int;
 
-    // Variables auxiliares para cálculo de coords
-    integer yo_int, xo_int;
-    integer yo_q, xo_q;
-    integer temp_q_y, temp_q_x;
-    integer ys_q, xs_q;
-    integer y_int, x_int;
-
-    // Auxiliares para interpolación
-    integer wx0, wy0;
-    integer w00, w10, w01, w11;
-    integer acc;
-    integer pix;
+    // Pesos e interpolación
+    logic signed [31:0] wx0, wy0;
+    logic signed [31:0] w00, w10, w01, w11;
+    logic signed [31:0] acc;
+    logic signed [31:0] pix;
 
     // ----------------------------------------------------------------
     // Lógica secuencial principal + stepping
+    //  (MISMA SECUENCIA QUE EL CORE ORIGINAL, SOLO CAMBIA EL TIPO)
     // ----------------------------------------------------------------
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -130,31 +131,39 @@ module bilinear_core_scalar #(
                             xo_int = cur_x;
 
                             // (yo + 0.5) en Q8.8
-                            yo_q = (yo_int << FRAC_BITS) + (ONE_Q/2);
-                            temp_q_y = (yo_q * inv_scale_q) >> FRAC_BITS;
-                            ys_q = temp_q_y - (ONE_Q/2);
+                            yo_q     = (yo_int <<< FRAC_BITS) + (ONE_Q/2);
+                            temp_q_y = (yo_q * $signed(inv_scale_q)) >>> FRAC_BITS;
+                            ys_q     = temp_q_y - (ONE_Q/2);
 
                             // (xo + 0.5) en Q8.8
-                            xo_q = (xo_int << FRAC_BITS) + (ONE_Q/2);
-                            temp_q_x = (xo_q * inv_scale_q) >> FRAC_BITS;
-                            xs_q = temp_q_x - (ONE_Q/2);
+                            xo_q     = (xo_int <<< FRAC_BITS) + (ONE_Q/2);
+                            temp_q_x = (xo_q * $signed(inv_scale_q)) >>> FRAC_BITS;
+                            xs_q     = temp_q_x - (ONE_Q/2);
 
                             // Parte entera (clamp a [0, in_h-1] / [0, in_w-1])
                             y_int = ys_q >>> FRAC_BITS;
-                            if (y_int < 0)           y_int = 0;
-                            else if (y_int > in_h-1) y_int = in_h-1;
+                            if (y_int < 0)
+                                y_int = 0;
+                            else if (y_int > $signed(in_h-1))
+                                y_int = $signed(in_h-1);
 
                             x_int = xs_q >>> FRAC_BITS;
-                            if (x_int < 0)           x_int = 0;
-                            else if (x_int > in_w-1) x_int = in_w-1;
+                            if (x_int < 0)
+                                x_int = 0;
+                            else if (x_int > $signed(in_w-1))
+                                x_int = $signed(in_w-1);
 
                             y0_i = y_int;
-                            if (y_int + 1 <= in_h-1) y1_i = y_int + 1;
-                            else                     y1_i = y_int;
+                            if (y_int + 1 <= $signed(in_h-1))
+                                y1_i = y_int + 1;
+                            else
+                                y1_i = y_int;
 
                             x0_i = x_int;
-                            if (x_int + 1 <= in_w-1) x1_i = x_int + 1;
-                            else                     x1_i = x_int;
+                            if (x_int + 1 <= $signed(in_w-1))
+                                x1_i = x_int + 1;
+                            else
+                                x1_i = x_int;
 
                             // Parte fraccional (0..255)
                             ty_q_i = ys_q & (ONE_Q - 1);
@@ -189,9 +198,12 @@ module bilinear_core_scalar #(
                                   rd_data2*w01 +
                                   rd_data3*w11;
 
-                            pix = (acc + (1 << 15)) >>> 16;
-                            if (pix < 0)        pix = 0;
-                            else if (pix > 255) pix = 255;
+                            // redondeo y saturación
+                            pix = (acc + (1 <<< 15)) >>> 16;
+                            if (pix < 0)
+                                pix = 0;
+                            else if (pix > 255)
+                                pix = 255;
 
                             wr_addr  <= cur_y * out_w + cur_x;
                             wr_data  <= pix[7:0];
@@ -249,29 +261,37 @@ module bilinear_core_scalar #(
                         yo_int = cur_y;
                         xo_int = cur_x;
 
-                        yo_q = (yo_int << FRAC_BITS) + (ONE_Q/2);
-                        temp_q_y = (yo_q * inv_scale_q) >> FRAC_BITS;
-                        ys_q = temp_q_y - (ONE_Q/2);
+                        yo_q     = (yo_int <<< FRAC_BITS) + (ONE_Q/2);
+                        temp_q_y = (yo_q * $signed(inv_scale_q)) >>> FRAC_BITS;
+                        ys_q     = temp_q_y - (ONE_Q/2);
 
-                        xo_q = (xo_int << FRAC_BITS) + (ONE_Q/2);
-                        temp_q_x = (xo_q * inv_scale_q) >> FRAC_BITS;
-                        xs_q = temp_q_x - (ONE_Q/2);
+                        xo_q     = (xo_int <<< FRAC_BITS) + (ONE_Q/2);
+                        temp_q_x = (xo_q * $signed(inv_scale_q)) >>> FRAC_BITS;
+                        xs_q     = temp_q_x - (ONE_Q/2);
 
                         y_int = ys_q >>> FRAC_BITS;
-                        if (y_int < 0)           y_int = 0;
-                        else if (y_int > in_h-1) y_int = in_h-1;
+                        if (y_int < 0)
+                            y_int = 0;
+                        else if (y_int > $signed(in_h-1))
+                            y_int = $signed(in_h-1);
 
                         x_int = xs_q >>> FRAC_BITS;
-                        if (x_int < 0)           x_int = 0;
-                        else if (x_int > in_w-1) x_int = in_w-1;
+                        if (x_int < 0)
+                            x_int = 0;
+                        else if (x_int > $signed(in_w-1))
+                            x_int = $signed(in_w-1);
 
                         y0_i = y_int;
-                        if (y_int + 1 <= in_h-1) y1_i = y_int + 1;
-                        else                     y1_i = y_int;
+                        if (y_int + 1 <= $signed(in_h-1))
+                            y1_i = y_int + 1;
+                        else
+                            y1_i = y_int;
 
                         x0_i = x_int;
-                        if (x_int + 1 <= in_w-1) x1_i = x_int + 1;
-                        else                     x1_i = x_int;
+                        if (x_int + 1 <= $signed(in_w-1))
+                            x1_i = x_int + 1;
+                        else
+                            x1_i = x_int;
 
                         ty_q_i = ys_q & (ONE_Q - 1);
                         tx_q_i = xs_q & (ONE_Q - 1);
@@ -302,9 +322,11 @@ module bilinear_core_scalar #(
                               rd_data2*w01 +
                               rd_data3*w11;
 
-                        pix = (acc + (1 << 15)) >>> 16;
-                        if (pix < 0)        pix = 0;
-                        else if (pix > 255) pix = 255;
+                        pix = (acc + (1 <<< 15)) >>> 16;
+                        if (pix < 0)
+                            pix = 0;
+                        else if (pix > 255)
+                            pix = 255;
 
                         wr_addr  <= cur_y * out_w + cur_x;
                         wr_data  <= pix[7:0];
