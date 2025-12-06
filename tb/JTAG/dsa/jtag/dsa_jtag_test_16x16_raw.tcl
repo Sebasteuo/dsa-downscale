@@ -5,28 +5,32 @@
 set raw_args $argv
 puts "Args recibidos: $raw_args"
 
-if {[llength $raw_args] != 6} {
+if {[llength $raw_args] != 8} {
     puts "Uso:"
     puts "  system-console --project-dir <ruta_qpf> \\"
-    puts "    --script=dsa_jtag_test_16x16_raw.tcl -- \\"
-    puts "    <img_w> <img_h> <scale_q8_8> <entrada.raw> <salida.raw>"
+    puts "    --script=dsa_jtag_downscale_raw.tcl -- \\"
+    puts "    <mode> <step_mode> <img_w> <img_h> <scale_q8_8> <entrada.raw> <salida.raw>"
     return
 }
 
-set in_raw  [lindex $raw_args 4]
-set out_raw [lindex $raw_args 5]
-
-set img_w       [lindex $raw_args 1]
-set img_h       [lindex $raw_args 2]
-set scale_q8_8  [lindex $raw_args 3]
+set mode       [lindex $raw_args 1]
+set step_mode  [lindex $raw_args 2]
+set img_w      [lindex $raw_args 3]
+set img_h      [lindex $raw_args 4]
+set scale_q8_8 [lindex $raw_args 5]
+set in_raw     [lindex $raw_args 6]
+set out_raw    [lindex $raw_args 7]
 
 puts "Parametros:"
+puts "  mode       = $mode      (0=escalar, 1=SIMD)"
+puts "  step_mode  = $step_mode (0=normal, 1=stepping)"
 puts "  img_w      = $img_w"
 puts "  img_h      = $img_h"
 puts "  scale_q8_8 = [format {0x%08X} $scale_q8_8]"
 puts "  input RAW  = $in_raw"
 puts "  output RAW = $out_raw"
 puts "------------------------------------------------"
+
 
 # 2) Cargar paquete master y obtener master JTAG
 
@@ -103,7 +107,8 @@ puts "Total palabras (32 bits): $total_words"
 reg_write $mp $BASE_ADDR $REG_IMG_W   $img_w
 reg_write $mp $BASE_ADDR $REG_IMG_H   $img_h
 reg_write $mp $BASE_ADDR $REG_SCALE   $scale_q8_8
-reg_write $mp $BASE_ADDR $REG_MODE    0x00000000  
+set mode_reg [expr {($mode & 1) | (($step_mode & 1) << 1)}]
+reg_write $mp $BASE_ADDR $REG_MODE $mode_reg  
 
 # 7) Escribir BRAM de entrada (in_mem) vía IN_ADDR / IN_DATA
 puts "Escribiendo BRAM de entrada con $total_words palabras..."
@@ -176,7 +181,7 @@ if {$out_pixels == 0} {
     puts "ADVERTENCIA: PERF_PIX = 0, nada que leer."
     set out_words 0
 } else {
-    set out_words [expr {($out_pixels + 3)}]
+    set out_words $out_pixels
 }
 puts "Lectura de salida: $out_pixels píxeles, $out_words palabras."
 

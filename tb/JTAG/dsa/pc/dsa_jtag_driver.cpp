@@ -233,6 +233,8 @@ std::vector<uint8_t> downscale_ref_bilinear(
 // La idea es que el script Tcl reciba:
 //   PROJ_DIR img_w img_h scale_hex in_raw out_raw
 static bool run_system_console(
+    int mode,
+    int step_mode,
     int img_w, int img_h,
     const std::string &scale_hex,
     const std::string &in_raw,
@@ -242,6 +244,8 @@ static bool run_system_console(
     cmd << SC_BIN
         << " -cli --script=" << TCL_SCRIPT
         << " " << PROJ_DIR
+        << " " << mode
+        << " " << step_mode
         << " " << img_w
         << " " << img_h
         << " " << scale_hex
@@ -267,24 +271,46 @@ static bool run_system_console(
 
 int main(int argc, char **argv)
 {
-    if (argc != 6)
+    if (argc != 8)
     {
         std::cerr << "Uso:\n  " << argv[0]
-                  << " <img_w> <img_h> <scale_hex> <in_raw> <out_hw_raw>\n\n";
+                  << " <mode> <step_mode> <img_w> <img_h> <scale_hex> <in_raw> <out_hw_raw>\n\n"
+                  << "    mode:      0 = escalar, 1 = SIMD\n"
+                  << "    step_mode: 0 = normal, 1 = stepping\n";
         return 1;
     }
 
-    int img_w = std::stoi(argv[1]);
-    int img_h = std::stoi(argv[2]);
-    std::string scale_hex = argv[3];
-    std::string in_raw = argv[4];
-    std::string out_hw = argv[5];
+    int mode = std::stoi(argv[1]);      // 0 = escalar, 1 = SIMD
+    int step_mode = std::stoi(argv[2]); // 0 = normal, 1 = stepping
+    int img_w = std::stoi(argv[3]);
+    int img_h = std::stoi(argv[4]);
+    std::string scale_hex = argv[5];
+    std::string in_raw = argv[6];
+    std::string out_hw = argv[7];
+
+    if (mode != 0 && mode != 1)
+    {
+        std::cerr << "ADVERTENCIA: mode=" << mode
+                  << " no es 0 ni 1. Se usará mode=" << (mode & 1) << ".\n";
+        mode &= 1;
+    }
+    if (step_mode != 0 && step_mode != 1)
+    {
+        std::cerr << "ADVERTENCIA: step_mode=" << step_mode
+                  << " no es 0 ni 1. Se usará step_mode=" << (step_mode & 1) << ".\n";
+        step_mode &= 1;
+    }
 
     std::cout << "Args brutos recibidos: "
+              << mode << " " << step_mode << " "
               << img_w << " " << img_h << " " << scale_hex
               << " " << in_raw << " " << out_hw << "\n";
 
     std::cout << "Parametros:\n";
+    std::cout << "  mode       = " << mode
+              << " (0=scalar, 1=SIMD)\n";
+    std::cout << "  step_mode  = " << step_mode
+              << " (0=normal, 1=stepping)\n";
     std::cout << "  img_w      = " << img_w << "\n";
     std::cout << "  img_h      = " << img_h << "\n";
 
@@ -315,6 +341,7 @@ int main(int argc, char **argv)
         std::cerr << "WARNING: src.size() < img_w*img_h, se asumirá 0 para faltantes.\n";
     }
 
+    /*
     // 2) Calcular out_w, out_h e inv_scale_q EXACTAMENTE como en dsa_top_seq.sv
     int out_w = 0;
     int out_h = 0;
@@ -445,22 +472,35 @@ int main(int argc, char **argv)
 
             ref_out[yo * out_w + xo] = static_cast<uint8_t>(pix);
         }
+    }*/
+    int ref_w = 0, ref_h = 0;
+    std::vector<uint8_t> ref_out;
+    try
+    {
+        ref_out = downscale_ref_bilinear(
+            img_w, img_h, scale_q8_8, src,
+            ref_w, ref_h);
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "ERROR en referencia bilineal: " << e.what() << "\n";
+        return 1;
     }
 
     // Guardar referencia para inspección
     save_raw("ref_out.raw", ref_out);
-    std::cout << "Ref: salida " << out_w << "x" << out_h
+    std::cout << "Ref: salida " << ref_w << "x" << ref_h
               << " escrita en ref_out.raw\n";
 
     // 4) Ejecutar el HW via system-console + Tcl (igual que antes)
-    if (!run_system_console(img_w, img_h, scale_hex, in_raw, out_hw))
+    if (!run_system_console(mode, step_mode, img_w, img_h, scale_hex, in_raw, out_hw))
     {
         std::cerr << "ERROR: fallo al invocar system-console.\n";
         return 1;
     }
 
-    // 5) Cargar salida de HW con las mismas dimensiones que la ref
-    auto hw_out = load_raw(out_hw, out_w, out_h);
+    // 4) Cargar salida de HW
+    auto hw_out = load_raw(out_hw, ref_w, ref_h);
     std::cout << "HW: leídos " << hw_out.size()
               << " bytes desde " << out_hw << "\n";
 
@@ -478,10 +518,10 @@ int main(int argc, char **argv)
         uint8_t hw = hw_out[i];
         if (ref != hw)
         {
-            if (mismatches < 50)
+            if (mismatches < 20)
             {
-                int x = i % out_w;
-                int y = i / out_w;
+                int x = i % ref_w;
+                int y = i / ref_w;
                 std::cout << "Mismatch en pixel " << i
                           << " (x=" << x << ", y=" << y << "): "
                           << "REF=0x" << std::hex << std::setw(2) << std::setfill('0') << (int)ref

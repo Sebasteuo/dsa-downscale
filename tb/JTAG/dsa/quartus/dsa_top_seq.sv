@@ -14,6 +14,7 @@ module dsa_top_seq #(
 ) (
   input  logic                  clk,
   input  logic                  rst_n,
+  input  logic                  step,
 
   // Bus simple tipo Avalon-MM
   input  logic                  h_wr_en,
@@ -55,6 +56,12 @@ module dsa_top_seq #(
   logic [15:0] img_h;
   logic [15:0] scale_q8_8;
   logic [7:0]  mode;
+  
+  wire core_mode      = mode[0];
+  wire core_step_mode = mode[1];
+  logic step_sync_0, step_sync_1;
+  logic step_sync_1_d;
+  logic step_pulse_btn;
 
   // Dimensiones de salida e inv_scale calculadas en HW
   logic [15:0] out_w;
@@ -280,10 +287,17 @@ module dsa_top_seq #(
       csr_addr  <= CSR_STATUS;
       csr_wdata <= 32'd0;
       cfg_state <= CFG_IDLE;
+		
+		step_sync_0   <= 1'b0;
+      step_sync_1   <= 1'b0;
+      step_sync_1_d <= 1'b0;
     end else begin		
       // Por defecto, no escribimos en BRAM de entrada en este ciclo
       in_host_we <= 1'b0;
 		csr_we     <= 1'b0;
+		step_sync_0   <= step;
+      step_sync_1   <= step_sync_0;
+      step_sync_1_d <= step_sync_1;
 
       // ==============================
       // Escrituras desde el host
@@ -381,7 +395,7 @@ module dsa_top_seq #(
       // Autoincremento de OUT_ADDR al leer OUT_DATA
       // ==============================
       if (h_rd_en && (h_addr == REG_OUT_DATA)) begin
-        if (out_ptr < MAX_WORDS[15:0]) begin
+        if (out_ptr < MAX_PIXELS[15:0]) begin
           out_ptr <= out_ptr + 16'd1;
         end
       end
@@ -415,11 +429,26 @@ module dsa_top_seq #(
           cfg_state <= CFG_WRITE_CTRL;
         end
 
-        CFG_WRITE_CTRL: begin
-          // EN=1, START=1, modo escalar (MODE=0), step=0
-          csr_we    <= 1'b1;
-          csr_addr  <= CSR_CTRL;
-          csr_wdata <= 32'h0000_0003;
+        CFG_WRITE_CTRL: begin  
+          logic [31:0] new_ctrl;
+          csr_we   <= 1'b1;
+          csr_addr <= CSR_CTRL;
+
+          // Construimos la palabra de control para bilinear_top:
+          // Asumimos el mapeo de bits:
+          //   bit 0: EN
+          //   bit 1: START
+          //   bit 2: MODE      (0 = escalar, 1 = SIMD)
+          //   bit 3: STEP_MODE (0 = run continuo, 1 = stepping)
+          //   bit 4: STEP      (pulso de step)
+          new_ctrl        = 32'd0;
+          new_ctrl[0]     = 1'b1;        // EN = 1
+          new_ctrl[1]     = 1'b1;        // START = 1
+          new_ctrl[2]     = core_mode;   // MODE: 0 = scalar, 1 = SIMD
+          new_ctrl[3]     = core_step_mode;        // STEP_MODE
+          new_ctrl[4]     = step;        // STEP
+
+          csr_wdata <= new_ctrl;
           cfg_state <= CFG_IDLE;
         end
 
@@ -488,5 +517,6 @@ module dsa_top_seq #(
   end
 
   assign h_rvalid = h_rd_en;
+  assign step_pulse_btn = step_sync_1 & ~step_sync_1_d;
 
 endmodule

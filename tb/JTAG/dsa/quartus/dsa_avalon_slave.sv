@@ -5,6 +5,7 @@ module dsa_avalon_slave #(
 ) (
   input  logic                   clk,
   input  logic                   reset_n,
+  input  logic                   step,
 
   // Avalon-MM slave
   input  logic [ADDR_WIDTH-1:0]  avs_address,
@@ -39,6 +40,7 @@ module dsa_avalon_slave #(
   ) u_dsa_top_seq (
     .clk      (clk),
     .rst_n    (reset_n),
+	 .step     (step),
     .h_wr_en  (h_wr_en),
     .h_rd_en  (h_rd_en),
     .h_addr   (h_addr),
