@@ -118,23 +118,28 @@ for {set w 0} {$w < $total_words} {incr w} {
 
     if {$idx < $num_pixels} {
         set b0 [lindex $in_bytes $idx]
+        #puts "bit $idx: $b0"
         incr idx
     }
     if {$idx < $num_pixels} {
         set b1 [lindex $in_bytes $idx]
+        #puts "bit $idx: $b1"
         incr idx
     }
     if {$idx < $num_pixels} {
         set b2 [lindex $in_bytes $idx]
+        #puts "bit $idx: $b2"
         incr idx
     }
     if {$idx < $num_pixels} {
         set b3 [lindex $in_bytes $idx]
+        #puts "bit $idx: $b3"
         incr idx
     }
 
     # Construimos palabra 0xAABBCCDD como: b3 b2 b1 b0
     set word [expr {($b3 << 24) | ($b2 << 16) | ($b1 << 8) | $b0}]
+    #puts "palabra $w: $word"
     reg_write $mp $BASE_ADDR $REG_IN_DATA $word
 }
 
@@ -171,7 +176,7 @@ if {$out_pixels == 0} {
     puts "ADVERTENCIA: PERF_PIX = 0, nada que leer."
     set out_words 0
 } else {
-    set out_words [expr {($out_pixels + 3) / 4}]
+    set out_words [expr {($out_pixels + 3)}]
 }
 puts "Lectura de salida: $out_pixels píxeles, $out_words palabras."
 
@@ -184,11 +189,8 @@ for {set w 0} {$w < $out_words} {incr w} {
 
     # Extraer 4 bytes little-endian
     set b0 [expr {$word        & 0xFF}]
-    set b1 [expr {($word >> 8) & 0xFF}]
-    set b2 [expr {($word >>16) & 0xFF}]
-    set b3 [expr {($word >>24) & 0xFF}]
 
-    lappend out_bytes $b0 $b1 $b2 $b3
+    lappend out_bytes $b0 
 }
 
 # Recortar a EXACTAMENTE out_pixels

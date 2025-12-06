@@ -49,3 +49,4 @@ tb/JTAG/dsa/quartus/*.rpt
 # Archivos de respaldo del editor
 *.sv.bak
 *.bak
+tb/JTAG/dsa/quartus/greybox_tmp

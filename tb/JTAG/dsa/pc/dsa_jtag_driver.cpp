@@ -478,7 +478,7 @@ int main(int argc, char **argv)
         uint8_t hw = hw_out[i];
         if (ref != hw)
         {
-            if (mismatches < 20)
+            if (mismatches < 50)
             {
                 int x = i % out_w;
                 int y = i / out_w;
